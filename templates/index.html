@@ -1,0 +1,419 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8"/>
+<title>G1 Sim – Harness Training</title>
+<style>
+  :root { --bg: #0d1117; --surface: #161b22; --border: #30363d; --text: #c9d1d9;
+          --muted: #8b949e; --accent: #58a6ff; --green: #3fb950; --orange: #d29922;
+          --red: #f85149; }
+  * { margin:0; padding:0; box-sizing:border-box; }
+  body { background:var(--bg); color:var(--text); font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif; display:flex; height:100vh; overflow:hidden; }
+
+  .viewer { flex:1; display:flex; flex-direction:column; min-width:0; }
+  .viewer header { padding:8px 16px; background:var(--surface); border-bottom:1px solid var(--border); display:flex; align-items:center; justify-content:space-between; flex-shrink:0; }
+  .viewer header h1 { font-size:16px; font-weight:600; }
+  .viewer header .tag { font-size:12px; color:var(--muted); }
+  .stream-wrap { flex:1; display:flex; align-items:center; justify-content:center; padding:8px; position:relative; background:#000; }
+  #stream { max-width:100%; max-height:100%; border-radius:6px; border:1px solid var(--border); cursor:grab; image-rendering:auto; }
+  #stream:active { cursor:grabbing; }
+
+  .hud { position:absolute; bottom:12px; left:50%; transform:translateX(-50%); background:rgba(22,27,34,.85);
+         border:1px solid var(--border); border-radius:6px; padding:6px 14px; font-size:11px; color:var(--muted);
+         display:flex; gap:16px; backdrop-filter:blur(6px); pointer-events:none; }
+  .hud span { color:var(--accent); font-weight:600; }
+
+  .panel { width:340px; flex-shrink:0; background:var(--surface); border-left:1px solid var(--border);
+           overflow-y:auto; display:flex; flex-direction:column; }
+  .panel h2 { font-size:14px; font-weight:600; padding:12px 16px 8px; border-bottom:1px solid var(--border); }
+  .section { padding:12px 16px; border-bottom:1px solid var(--border); }
+  .section h3 { font-size:12px; text-transform:uppercase; letter-spacing:.5px; color:var(--muted); margin-bottom:8px; }
+
+  .slider-row { display:flex; align-items:center; gap:8px; margin-bottom:10px; }
+  .slider-row label { width:72px; font-size:12px; color:var(--muted); flex-shrink:0; }
+  .slider-row input[type=range] { flex:1; accent-color:var(--accent); }
+  .slider-row .val { width:52px; text-align:right; font-size:12px; font-weight:600; font-variant-numeric:tabular-nums; }
+
+  .presets { display:grid; grid-template-columns:1fr 1fr; gap:6px; }
+  .presets button, .action-btn { border:1px solid var(--border); background:var(--bg); color:var(--text);
+                                  border-radius:6px; padding:8px 10px; font-size:12px; cursor:pointer;
+                                  transition:background .15s, border-color .15s; }
+  .presets button:hover, .action-btn:hover { background:var(--surface); border-color:var(--accent); }
+  .presets button.active { border-color:var(--accent); background:rgba(88,166,255,.12); }
+
+  .auto-section { display:flex; flex-direction:column; gap:8px; }
+  .auto-row { display:flex; gap:6px; align-items:center; }
+  .auto-row input { width:60px; background:var(--bg); border:1px solid var(--border); border-radius:4px;
+                    color:var(--text); padding:4px 6px; font-size:12px; text-align:center; }
+  .auto-row label { font-size:12px; color:var(--muted); }
+  .btn-lower { background:var(--orange)!important; color:#000!important; font-weight:600; }
+  .btn-lower:hover { background:#e6a817!important; }
+  .btn-stop { background:var(--red)!important; color:#fff!important; font-weight:600; }
+  .btn-release { background:transparent; border-color:var(--red)!important; color:var(--red)!important; }
+
+  .status-bar { display:flex; gap:12px; padding:8px 16px; font-size:11px; color:var(--muted); border-top:1px solid var(--border); margin-top:auto; }
+  .status-dot { width:8px; height:8px; border-radius:50%; display:inline-block; margin-right:4px; }
+  .dot-on { background:var(--green); }
+  .dot-off { background:var(--red); }
+  .dot-auto { background:var(--orange); animation:pulse 1s infinite; }
+  @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.4} }
+
+  #forceGraph { width:100%; height:80px; border-radius:4px; background:var(--bg); border:1px solid var(--border); }
+
+  .help { padding:8px 16px; font-size:11px; color:var(--muted); line-height:1.7; }
+  kbd { background:var(--bg); border:1px solid var(--border); border-radius:3px; padding:1px 5px; font-size:10px; color:var(--text); }
+
+  .action-grid { display:grid; grid-template-columns:1fr 1fr; gap:6px; }
+  .btn-action { border:1px solid var(--border); background:var(--bg); color:var(--text);
+                border-radius:6px; padding:8px 10px; font-size:12px; cursor:pointer;
+                transition:background .15s, border-color .15s; }
+  .btn-action:hover { background:var(--surface); border-color:var(--accent); }
+  .btn-action.running { border-color:var(--green); background:rgba(63,185,80,.12); }
+  .btn-action-stop { border-color:var(--red)!important; color:var(--red)!important; }
+</style>
+</head>
+<body>
+
+<div class="viewer">
+  <header>
+    <h1>Unitree G1 &mdash; Harness Training</h1>
+    <span class="tag">DDS domain <strong>{{ domain_id }}</strong> &middot; <strong>{{ interface }}</strong></span>
+  </header>
+  <div class="stream-wrap">
+    <canvas id="stream"></canvas>
+    <div class="hud">
+      <div>Az <span id="hud-az">0</span>&deg;</div>
+      <div>El <span id="hud-el">0</span>&deg;</div>
+      <div>Dist <span id="hud-dist">0</span></div>
+      <div>Robot Z <span id="hud-rz">0</span></div>
+      <div>FPS <span id="hud-fps">-</span></div>
+    </div>
+  </div>
+</div>
+
+<div class="panel">
+  <h2>Harness Control</h2>
+
+  <div class="section">
+    <h3>Parameters</h3>
+    <div class="slider-row">
+      <label>Height</label>
+      <input type="range" id="sl-height" min="0" max="3" step="0.01" value="1.5"/>
+      <div class="val" id="v-height">1.50 m</div>
+    </div>
+    <div class="slider-row">
+      <label>Stiffness</label>
+      <input type="range" id="sl-stiffness" min="0" max="600" step="1" value="300"/>
+      <div class="val" id="v-stiffness">300</div>
+    </div>
+    <div class="slider-row">
+      <label>Damping</label>
+      <input type="range" id="sl-damping" min="0" max="400" step="1" value="150"/>
+      <div class="val" id="v-damping">150</div>
+    </div>
+  </div>
+
+  <div class="section">
+    <h3>Presets</h3>
+    <div class="presets">
+      <button onclick="preset('full')" id="p-full">Full Support</button>
+      <button onclick="preset('partial')" id="p-partial">Feet on Ground</button>
+      <button onclick="preset('light')" id="p-light">Light Catch</button>
+      <button onclick="preset('released')" class="btn-release" id="p-released">Released</button>
+    </div>
+  </div>
+
+  <div class="section">
+    <h3>Robot Actions</h3>
+    <div class="action-grid">
+      <button class="btn-action" id="act-stand" onclick="startAction('stand')">Stand</button>
+      <button class="btn-action" id="act-walk" onclick="startAction('walk')">Walk</button>
+    </div>
+    <div class="slider-row" style="margin-top:10px;">
+      <label>Walk Speed</label>
+      <input type="range" id="sl-walk-speed" min="0" max="1" step="0.05" value="0.6"/>
+      <div class="val" id="v-walk-speed">0.60</div>
+    </div>
+    <div class="slider-row">
+      <label>Gait Freq</label>
+      <input type="range" id="sl-walk-freq" min="0.5" max="2.5" step="0.1" value="1.2"/>
+      <div class="val" id="v-walk-freq">1.2 Hz</div>
+    </div>
+    <div style="margin-top:6px;">
+      <button class="btn-action btn-action-stop" onclick="stopAction()" style="width:100%;">Stop Action</button>
+    </div>
+  </div>
+
+  <div class="section">
+    <h3>ONNX Policy</h3>
+    <div style="margin-bottom:8px;">
+      <label style="font-size:12px;color:var(--muted);display:block;margin-bottom:4px;">Model Path</label>
+      <input type="text" id="policy-path" value="" placeholder="/path/to/policy.onnx"
+             style="width:100%;background:var(--bg);border:1px solid var(--border);border-radius:4px;color:var(--text);padding:5px 8px;font-size:12px;"/>
+    </div>
+    <div style="display:flex;gap:8px;margin-bottom:10px;align-items:center;">
+      <label style="font-size:12px;color:var(--muted);width:50px;flex-shrink:0;">Device</label>
+      <select id="policy-device" style="flex:1;background:var(--bg);border:1px solid var(--border);border-radius:4px;color:var(--text);padding:5px 8px;font-size:12px;">
+        <option value="CPU">CPU</option>
+        <option value="NPU">NPU</option>
+        <option value="GPU">GPU</option>
+      </select>
+    </div>
+    <div class="slider-row">
+      <label>Vx</label>
+      <input type="range" id="sl-vx" min="-1" max="1" step="0.05" value="0.5"/>
+      <div class="val" id="v-vx">0.50</div>
+    </div>
+    <div class="slider-row">
+      <label>Vy</label>
+      <input type="range" id="sl-vy" min="-0.5" max="0.5" step="0.05" value="0.0"/>
+      <div class="val" id="v-vy">0.00</div>
+    </div>
+    <div class="slider-row">
+      <label>Vyaw</label>
+      <input type="range" id="sl-vyaw" min="-1" max="1" step="0.05" value="0.0"/>
+      <div class="val" id="v-vyaw">0.00</div>
+    </div>
+    <div style="display:flex;gap:6px;margin-top:6px;">
+      <button class="btn-action" id="act-policy" onclick="startPolicy()" style="flex:1;">Run Policy</button>
+      <button class="btn-action btn-action-stop" onclick="stopAction()" style="width:60px;">Stop</button>
+    </div>
+  </div>
+
+  <div class="section">
+    <h3>Auto Lower</h3>
+    <div class="auto-section">
+      <div class="auto-row">
+        <label>Duration</label>
+        <input id="auto-dur" type="number" value="10" min="1" max="120"/> <label>sec</label>
+      </div>
+      <div class="auto-row">
+        <label>Target H</label>
+        <input id="auto-th" type="number" value="0.78" min="0" max="3" step="0.01"/> <label>m</label>
+      </div>
+      <div class="auto-row">
+        <label>Target K</label>
+        <input id="auto-tk" type="number" value="0" min="0" max="600" step="1"/> <label>N/m</label>
+      </div>
+      <div style="display:flex;gap:6px;margin-top:4px;">
+        <button class="action-btn btn-lower" onclick="autoLower()" id="btn-auto" style="flex:1;">Start Lowering</button>
+        <button class="action-btn btn-stop" onclick="autoStop()" style="width:60px;">Stop</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="section">
+    <h3>Harness Force</h3>
+    <canvas id="forceGraph"></canvas>
+  </div>
+
+  <div class="section help">
+    <strong>Camera</strong><br/>
+    <kbd>Left-drag</kbd> Orbit &nbsp; <kbd>Right-drag</kbd> Pan &nbsp; <kbd>Scroll</kbd> Zoom &nbsp; <kbd>R</kbd> Reset
+  </div>
+
+  <div class="status-bar">
+    <div><span class="status-dot" id="dot-harness"></span> Harness <span id="st-harness">-</span></div>
+    <div><span class="status-dot" id="dot-auto"></span> Auto <span id="st-auto">off</span></div>
+    <div><span class="status-dot" id="dot-action"></span> Action <span id="st-action">-</span></div>
+  </div>
+</div>
+
+<script>
+// ===== WebSocket + Canvas stream (vsync-aligned) =====
+const cv = document.getElementById('stream');
+const gl = cv.getContext('2d');
+
+let pendingBlob = null;
+let rafScheduled = false;
+let fpsFrames = 0, fpsLast = performance.now();
+let wsRef = null;
+
+function connectStream() {
+  const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+  const ws = new WebSocket(proto + '//' + location.host + '/ws/stream');
+  ws.binaryType = 'arraybuffer';
+  wsRef = ws;
+
+  ws.onmessage = (e) => {
+    pendingBlob = new Blob([e.data], {type: 'image/jpeg'});
+    if (!rafScheduled) {
+      rafScheduled = true;
+      requestAnimationFrame(renderFrame);
+    }
+  };
+
+  ws.onclose = () => {
+    wsRef = null;
+    setTimeout(connectStream, 1000);
+  };
+  ws.onerror = () => ws.close();
+}
+
+async function renderFrame() {
+  rafScheduled = false;
+  if (!pendingBlob) return;
+
+  const blob = pendingBlob;
+  pendingBlob = null;
+
+  const bmp = await createImageBitmap(blob);
+  if (cv.width !== bmp.width || cv.height !== bmp.height) {
+    cv.width = bmp.width;
+    cv.height = bmp.height;
+  }
+  gl.drawImage(bmp, 0, 0);
+  bmp.close();
+
+  fpsFrames++;
+  const now = performance.now();
+  if (now - fpsLast >= 1000) {
+    document.getElementById('hud-fps').textContent = fpsFrames;
+    fpsFrames = 0;
+    fpsLast = now;
+  }
+}
+
+connectStream();
+
+// ===== Camera controls (on canvas) =====
+let dragging = false, mbtn = 0, lastX = 0, lastY = 0;
+function sendCam(p){fetch('/camera',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(p)});}
+
+cv.addEventListener('mousedown', e => {
+  dragging = true; mbtn = e.button; lastX = e.clientX; lastY = e.clientY; e.preventDefault();
+});
+window.addEventListener('mouseup', () => { dragging = false; });
+window.addEventListener('mousemove', e => {
+  if (!dragging) return;
+  const dx = e.clientX - lastX, dy = e.clientY - lastY;
+  lastX = e.clientX; lastY = e.clientY;
+  if (mbtn === 0) sendCam({action:'orbit', dx, dy});
+  else if (mbtn === 2) sendCam({action:'pan', dx, dy});
+});
+cv.addEventListener('wheel', e => { e.preventDefault(); sendCam({action:'zoom', delta:e.deltaY}); });
+cv.addEventListener('contextmenu', e => e.preventDefault());
+window.addEventListener('keydown', e => { if (e.key === 'r' || e.key === 'R') sendCam({action:'reset'}); });
+
+// ===== Harness sliders =====
+function sendHarness(p){fetch('/harness',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(p)});}
+document.getElementById('sl-height').addEventListener('input', function(){
+  document.getElementById('v-height').textContent = parseFloat(this.value).toFixed(2)+' m';
+  sendHarness({height: parseFloat(this.value)});
+});
+document.getElementById('sl-stiffness').addEventListener('input', function(){
+  document.getElementById('v-stiffness').textContent = this.value;
+  sendHarness({stiffness: parseFloat(this.value)});
+});
+document.getElementById('sl-damping').addEventListener('input', function(){
+  document.getElementById('v-damping').textContent = this.value;
+  sendHarness({damping: parseFloat(this.value)});
+});
+
+// ===== Presets =====
+function preset(name){fetch('/harness/preset',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({preset:name})});}
+function autoLower(){
+  const dur = parseFloat(document.getElementById('auto-dur').value);
+  const th = parseFloat(document.getElementById('auto-th').value);
+  const tk = parseFloat(document.getElementById('auto-tk').value);
+  fetch('/harness/auto_lower',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({duration:dur,target_height:th,target_stiffness:tk})});
+}
+function autoStop(){fetch('/harness/auto_stop',{method:'POST'});}
+
+// ===== Robot actions =====
+document.getElementById('sl-walk-speed').addEventListener('input', function(){
+  document.getElementById('v-walk-speed').textContent = parseFloat(this.value).toFixed(2);
+});
+document.getElementById('sl-walk-freq').addEventListener('input', function(){
+  document.getElementById('v-walk-freq').textContent = parseFloat(this.value).toFixed(1)+' Hz';
+});
+function startAction(name){
+  const body = {name};
+  if (name === 'walk') {
+    body.speed = parseFloat(document.getElementById('sl-walk-speed').value);
+    body.freq = parseFloat(document.getElementById('sl-walk-freq').value);
+  }
+  fetch('/action/start',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+}
+function startPolicy(){
+  const body = {
+    name: 'policy',
+    policy_path: document.getElementById('policy-path').value,
+    device: document.getElementById('policy-device').value,
+    vx: parseFloat(document.getElementById('sl-vx').value),
+    vy: parseFloat(document.getElementById('sl-vy').value),
+    vyaw: parseFloat(document.getElementById('sl-vyaw').value),
+  };
+  fetch('/action/start',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+}
+function stopAction(){fetch('/action/stop',{method:'POST'});}
+document.getElementById('sl-vx').addEventListener('input', function(){
+  document.getElementById('v-vx').textContent = parseFloat(this.value).toFixed(2);
+});
+document.getElementById('sl-vy').addEventListener('input', function(){
+  document.getElementById('v-vy').textContent = parseFloat(this.value).toFixed(2);
+});
+document.getElementById('sl-vyaw').addEventListener('input', function(){
+  document.getElementById('v-vyaw').textContent = parseFloat(this.value).toFixed(2);
+});
+
+// ===== Polling state =====
+function poll(){
+  fetch('/state').then(r=>r.json()).then(d=>{
+    const h = d.harness, c = d.camera;
+    document.getElementById('sl-height').value = h.height;
+    document.getElementById('v-height').textContent = h.height.toFixed(2)+' m';
+    document.getElementById('sl-stiffness').value = h.stiffness;
+    document.getElementById('v-stiffness').textContent = Math.round(h.stiffness);
+    document.getElementById('sl-damping').value = h.damping;
+    document.getElementById('v-damping').textContent = Math.round(h.damping);
+    document.getElementById('hud-az').textContent = c.azimuth.toFixed(1);
+    document.getElementById('hud-el').textContent = c.elevation.toFixed(1);
+    document.getElementById('hud-dist').textContent = c.distance.toFixed(2);
+    document.getElementById('hud-rz').textContent = d.robot_z.toFixed(3);
+    const dotH = document.getElementById('dot-harness');
+    const dotA = document.getElementById('dot-auto');
+    dotH.className = 'status-dot ' + (h.enabled ? 'dot-on' : 'dot-off');
+    document.getElementById('st-harness').textContent = h.enabled ? 'ON' : 'OFF';
+    dotA.className = 'status-dot ' + (h.auto_lowering ? 'dot-auto' : 'dot-off');
+    document.getElementById('st-auto').textContent = h.auto_lowering ? 'lowering' : 'off';
+    ['full','partial','light','released'].forEach(n => document.getElementById('p-'+n).classList.remove('active'));
+    if (!h.enabled) document.getElementById('p-released').classList.add('active');
+    else if (h.stiffness >= 280) document.getElementById('p-full').classList.add('active');
+    else if (h.stiffness >= 120) document.getElementById('p-partial').classList.add('active');
+    else if (h.stiffness > 0) document.getElementById('p-light').classList.add('active');
+    const actName = d.action;
+    const dotAc = document.getElementById('dot-action');
+    dotAc.className = 'status-dot ' + (actName ? 'dot-on' : 'dot-off');
+    document.getElementById('st-action').textContent = actName || '-';
+    ['stand','walk','policy'].forEach(n => {
+      const el = document.getElementById('act-'+n);
+      if (el) el.classList.toggle('running', actName && actName.toLowerCase().includes(n));
+    });
+    drawGraph(h.force_history || []);
+  }).catch(()=>{});
+}
+setInterval(poll, 300);
+poll();
+
+// ===== Force graph =====
+const fgCanvas = document.getElementById('forceGraph');
+const fgCtx = fgCanvas.getContext('2d');
+function drawGraph(data){
+  const W = fgCanvas.width = fgCanvas.offsetWidth * 2, H = fgCanvas.height = fgCanvas.offsetHeight * 2;
+  fgCtx.clearRect(0, 0, W, H);
+  if (data.length < 2) return;
+  const maxF = Math.max(50, ...data) * 1.1;
+  fgCtx.strokeStyle = '#58a6ff'; fgCtx.lineWidth = 2; fgCtx.beginPath();
+  for (let i = 0; i < data.length; i++) {
+    const x = i / (data.length - 1) * W, y = H - data[i] / maxF * H;
+    i === 0 ? fgCtx.moveTo(x, y) : fgCtx.lineTo(x, y);
+  }
+  fgCtx.stroke();
+  fgCtx.fillStyle = '#8b949e'; fgCtx.font = '18px sans-serif';
+  fgCtx.fillText(Math.round(data[data.length - 1]) + ' N', 8, 22);
+  fgCtx.fillText('max ' + Math.round(maxF) + ' N', W - 120, 22);
+}
+</script>
+</body>
+</html>
