@@ -17,6 +17,7 @@ from unitree_sdk2py.core.channel import (
 )
 from unitree_sdk2py.idl.default import unitree_hg_msg_dds__LowCmd_
 from unitree_sdk2py.idl.unitree_hg.msg.dds_ import LowCmd_, LowState_
+from unitree_sdk2py.idl.unitree_go.msg.dds_ import SportModeState_
 from unitree_sdk2py.utils.crc import CRC
 
 from .joints import NUM_MOTORS, KP_DEFAULT, KD_DEFAULT
@@ -44,6 +45,7 @@ class G1Action:
 
         self._low_cmd = unitree_hg_msg_dds__LowCmd_()
         self._low_state = None
+        self._high_state = None
         self._running = False
         self._t = 0.0
 
@@ -63,14 +65,37 @@ class G1Action:
         return np.array([self._low_state.motor_state[i].dq for i in range(NUM_MOTORS)])
 
     def get_imu(self):
-        """IMU readings from LowState: quaternion, gyroscope, accelerometer."""
+        """IMU readings plus body-frame linear velocity from highstate."""
         if self._low_state is None:
-            return {"quat": [1, 0, 0, 0], "gyro": [0, 0, 0], "accel": [0, 0, 0]}
+            return {
+                "quat": [1, 0, 0, 0],
+                "gyro": [0, 0, 0],
+                "accel": [0, 0, 0],
+                "linvel": [0, 0, 0],
+            }
         imu = self._low_state.imu_state
+        quat = list(imu.quaternion)
+
+        linvel = [0.0, 0.0, 0.0]
+        if self._high_state is not None:
+            world_vel = np.array([
+                self._high_state.velocity[0],
+                self._high_state.velocity[1],
+                self._high_state.velocity[2],
+            ], dtype=np.float64)
+            w, x, y, z = quat
+            rot = np.array([
+                [1 - 2*(y*y + z*z), 2*(x*y - w*z),     2*(x*z + w*y)],
+                [2*(x*y + w*z),     1 - 2*(x*x + z*z), 2*(y*z - w*x)],
+                [2*(x*z - w*y),     2*(y*z + w*x),     1 - 2*(x*x + y*y)],
+            ], dtype=np.float64)
+            linvel = (rot.T @ world_vel).tolist()
+
         return {
-            "quat": list(imu.quaternion),
+            "quat": quat,
             "gyro": list(imu.gyroscope),
             "accel": list(imu.accelerometer),
+            "linvel": linvel,
         }
 
     # -- Subclass interface --------------------------------------------------
@@ -96,8 +121,14 @@ class G1Action:
         self._sub = ChannelSubscriber("rt/lowstate", LowState_)
         self._sub.Init(self._on_low_state, 10)
 
+        self._high_sub = ChannelSubscriber("rt/sportmodestate", SportModeState_)
+        self._high_sub.Init(self._on_high_state, 10)
+
     def _on_low_state(self, msg: LowState_):
         self._low_state = msg
+
+    def _on_high_state(self, msg: SportModeState_):
+        self._high_state = msg
 
     # -- Control loop --------------------------------------------------------
 

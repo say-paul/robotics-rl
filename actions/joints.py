@@ -56,18 +56,19 @@ class J:
     RightWristYaw = 28
 
 
-# PD gains per joint (from Unitree SDK low-level example)
+# PD gains per joint – legs match Unitree's official unitree_rl_gym/g1 config.
+# Hip: Kp=100 Kd=2, Knee: Kp=150 Kd=4, Ankle: Kp=40 Kd=2
 KP_DEFAULT = [
-    60, 60, 60, 100, 40, 40,       # left leg
-    60, 60, 60, 100, 40, 40,       # right leg
-    60, 40, 40,                     # waist
-    40, 40, 40, 40, 40, 40, 40,    # left arm
-    40, 40, 40, 40, 40, 40, 40,    # right arm
+    100, 100, 100, 150, 40, 40,     # left leg
+    100, 100, 100, 150, 40, 40,     # right leg
+    60,  40,  40,                    # waist
+    40,  40,  40,  40, 40, 40, 40,  # left arm
+    40,  40,  40,  40, 40, 40, 40,  # right arm
 ]
 
 KD_DEFAULT = [
-    1, 1, 1, 2, 1, 1,     # left leg
-    1, 1, 1, 2, 1, 1,     # right leg
+    2, 2, 2, 4, 2, 2,     # left leg
+    2, 2, 2, 4, 2, 2,     # right leg
     1, 1, 1,               # waist
     1, 1, 1, 1, 1, 1, 1,  # left arm
     1, 1, 1, 1, 1, 1, 1,  # right arm
@@ -87,4 +88,6 @@ DEFAULT_POSITIONS = [
 ]
 
 # RL policy action scale (action output * ACTION_SCALE + DEFAULT_POSITIONS = target).
-ACTION_SCALE = 0.5
+# Unitree's official rl_gym uses 0.25; larger values amplify exploration noise
+# into oversized joint deltas that destabilise the robot.
+ACTION_SCALE = 0.25

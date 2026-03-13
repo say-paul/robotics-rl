@@ -1,14 +1,16 @@
 """
-HTTP routes: UI page, camera, harness, actions, and state polling.
+HTTP routes: UI page, camera, harness, policy actions, reset, and state polling.
 """
 
 import math
+from glob import glob
+from pathlib import Path
 
+import mujoco
 import numpy as np
 from flask import render_template, request, jsonify
 
 from actions import ACTION_REGISTRY
-from actions.walk import WalkGaitParams
 
 import config
 
@@ -103,12 +105,12 @@ def register_routes(app, ctx):
         ctx.harness.stop_auto_lower()
         return jsonify(ok=True)
 
-    # ---- Actions ----
+    # ---- Policy actions ----
 
     @app.route("/action/start", methods=["POST"])
     def action_start():
         data = request.get_json(silent=True) or {}
-        name = data.get("name", "")
+        name = data.get("name", "policy")
 
         cls = ACTION_REGISTRY.get(name)
         if cls is None:
@@ -119,15 +121,7 @@ def register_routes(app, ctx):
                 ctx.active_action.stop()
 
             kwargs = {}
-            if name == "walk":
-                kwargs["speed"] = data.get("speed", 0.6)
-                params = WalkGaitParams()
-                if "freq" in data:
-                    params.freq = data["freq"]
-                kwargs["params"] = params
-            elif name == "stand":
-                kwargs["duration"] = data.get("duration", 3.0)
-            elif name == "policy":
+            if name == "policy":
                 kwargs["policy_path"] = data.get("policy_path", "")
                 kwargs["device"] = data.get("device", "CPU")
                 kwargs["vx"] = data.get("vx", 0.0)
@@ -148,6 +142,34 @@ def register_routes(app, ctx):
                 ctx.active_action.stop()
                 ctx.active_action = None
         return jsonify(ok=True)
+
+    # ---- Reset (respawn robot at default pose) ----
+
+    @app.route("/reset", methods=["POST"])
+    def reset_robot():
+        with ctx.action_lock:
+            if ctx.active_action is not None and ctx.active_action.running:
+                ctx.active_action.stop()
+                ctx.active_action = None
+
+        ctx.harness.preset_full_support()
+
+        with ctx.physics_lock:
+            mujoco.mj_resetData(ctx.mj_model, ctx.mj_data)
+            mujoco.mj_forward(ctx.mj_model, ctx.mj_data)
+
+        return jsonify(ok=True)
+
+    # ---- Available ONNX policies ----
+
+    @app.route("/policies")
+    def list_policies():
+        onnx_files = sorted(
+            p.name
+            for p in Path("policies").glob("*.onnx")
+            if not p.name.endswith(".onnx.data")
+        )
+        return jsonify(policies=onnx_files)
 
     # ---- Unified state ----
 
