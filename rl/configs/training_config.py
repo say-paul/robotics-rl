@@ -3,7 +3,18 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Dict, List, Tuple
+from typing import List, Tuple
+
+import numpy as np
+from numpy.typing import NDArray
+
+
+NUM_MOTORS = 29
+
+# Pre-built joint masks (0 = free, 1 = enforce default pose)
+_MASK_ALL = np.ones(NUM_MOTORS, dtype=np.float64)
+_MASK_UPPER = np.zeros(NUM_MOTORS, dtype=np.float64)
+_MASK_UPPER[12:] = 1.0  # waist + arms
 
 
 @dataclass
@@ -33,27 +44,61 @@ class EnvConfig:
     # Phase oscillator
     phase_freq: float = 1.25         # Hz
 
+    # Domain randomization
+    domain_rand: bool = False
+    friction_range: Tuple[float, float] = (0.5, 2.0)
+    mass_range: Tuple[float, float] = (0.8, 1.2)
+    push_interval: Tuple[float, float] = (2.0, 5.0)
+    push_magnitude: float = 30.0     # Newtons
+    gyro_noise: float = 0.0          # std-dev added to gyro obs
+    joint_pos_noise: float = 0.0     # std-dev added to joint pos obs
+
 
 @dataclass
 class RewardConfig:
     """Reward component weights.
 
-    Weights calibrated from Unitree's official unitree_rl_gym G1 config.
-    Height penalty is intentionally strong to prevent crouching/collapse.
+    Weights enforce strict human-like posture: arms at sides, waist stable,
+    symmetric stance, smooth minimal actions.
     """
 
+    # Velocity tracking
     velocity_tracking: float = 1.5
     lateral_velocity: float = 0.8
     yaw_rate: float = 0.5
+
+    # Core stability
     upright: float = 1.0
     height: float = 10.0
-    energy: float = -0.005
-    action_smoothness: float = -0.05
-    joint_limits: float = -5.0
     alive: float = 0.15
+
+    # Human-posture enforcement
+    default_pose_tracking: float = 0.0
+    waist_stability: float = 0.0
+    arm_pose_penalty: float = 0.0
+    knee_symmetry: float = 0.0
+
+    # Anti-jitter / smoothness
+    angular_vel_penalty: float = 0.0
+    linear_vel_penalty: float = 0.0
+    action_smoothness: float = -0.05
+    action_magnitude: float = 0.0
+    torque_penalty: float = 0.0
+
+    # Gait quality
+    foot_clearance: float = 0.0
+    feet_air_time: float = 0.0
     feet_contact: float = 0.2
 
+    # Efficiency
+    energy: float = -0.005
+    joint_limits: float = -5.0
+
+    # Physical targets
     target_height: float = 0.68      # pelvis z for knees-bent stance
+
+    # Joint mask for default_pose_tracking (set per stage)
+    pose_mask: NDArray = field(default_factory=lambda: _MASK_ALL.copy())
 
 
 @dataclass
@@ -70,8 +115,9 @@ class PPOConfig:
     ent_coef: float = 0.01
     vf_coef: float = 0.5
     max_grad_norm: float = 1.0
-    log_std_init: float = -0.2
-    net_arch: List[int] = field(default_factory=lambda: [256, 256, 256])
+    log_std_init: float = -1.0
+    net_arch: List[int] = field(default_factory=lambda: [512, 256, 128])
+    activation: str = "silu"         # tanh | silu | elu
     n_envs: int = 16
     total_timesteps: int = 50_000_000
 
@@ -94,40 +140,139 @@ class TrainingConfig:
 
     @classmethod
     def stage_stand(cls) -> TrainingConfig:
-        """Curriculum stage 1: learn to stand and balance."""
+        """Curriculum stage 1: rock-solid human-like standing."""
         cfg = cls()
+        cfg.env.episode_length = 2000           # 40 s
         cfg.env.cmd_vx_range = (0.0, 0.0)
         cfg.env.cmd_vy_range = (0.0, 0.0)
         cfg.env.cmd_vyaw_range = (0.0, 0.0)
-        cfg.reward.velocity_tracking = 0.0
-        cfg.reward.lateral_velocity = 0.0
-        cfg.reward.yaw_rate = 0.0
-        cfg.reward.upright = 3.0
-        cfg.reward.height = 15.0
-        cfg.reward.alive = 1.0
-        cfg.reward.energy = -0.01
-        cfg.reward.action_smoothness = -0.1
-        cfg.reward.joint_limits = -5.0
-        cfg.ppo.total_timesteps = 5_000_000
+
+        r = cfg.reward
+        r.velocity_tracking = 0.0
+        r.lateral_velocity = 0.0
+        r.yaw_rate = 0.0
+
+        # Positive incentives -- balanced so no single term dominates.
+        # Max positive ≈ 20/step when perfectly still at default pose.
+        r.upright = 3.0
+        r.height = 8.0                         # was 15; reduced to prevent domination
+        r.alive = 1.0
+        r.default_pose_tracking = 8.0          # was 5; with wider Gaussian (scale=2)
+
+        r.pose_mask = _MASK_ALL.copy()
+
+        # Phase-1 penalties: moderate so the policy can first learn to stand.
+        # Phase-2 (stage_stand_phase2) tightens these to eliminate jitter.
+        r.action_magnitude = -0.3
+        r.action_smoothness = -0.3
+        r.angular_vel_penalty = -1.0
+        r.linear_vel_penalty = -2.0
+        r.torque_penalty = -5e-5
+        r.waist_stability = -2.0
+        r.arm_pose_penalty = -1.5
+        r.knee_symmetry = -1.0
+        r.energy = -0.01
+        r.joint_limits = -5.0
+        r.feet_contact = 0.0
+        r.foot_clearance = 0.0
+        r.feet_air_time = 0.0
+
+        cfg.ppo.total_timesteps = 20_000_000
+        return cfg
+
+    @classmethod
+    def stage_stand_phase2(cls) -> TrainingConfig:
+        """Phase 2: tighten penalties on an already-standing policy.
+
+        The policy from phase-1 can stand; now we force near-zero actions
+        so it stands rock-solid without jitter.
+        """
+        cfg = cls.stage_stand()
+        r = cfg.reward
+        r.action_magnitude = -1.5
+        r.action_smoothness = -0.8
+        r.angular_vel_penalty = -3.0
+        r.linear_vel_penalty = -5.0
+        r.torque_penalty = -1e-4
+        r.waist_stability = -3.0
+        r.arm_pose_penalty = -2.0
+        r.knee_symmetry = -1.5
+        r.energy = -0.01
+        cfg.ppo.log_std_init = -2.0
+        cfg.ppo.total_timesteps = 10_000_000
         return cfg
 
     @classmethod
     def stage_slow_walk(cls) -> TrainingConfig:
-        """Curriculum stage 2: slow forward walking."""
+        """Curriculum stage 2: smooth forward walking with human gait."""
         cfg = cls()
+        cfg.env.episode_length = 3000           # 60 s
         cfg.env.cmd_vx_range = (0.0, 0.3)
         cfg.env.cmd_vy_range = (0.0, 0.0)
         cfg.env.cmd_vyaw_range = (0.0, 0.0)
-        cfg.reward.height = 0.2
-        cfg.ppo.total_timesteps = 20_000_000
+
+        r = cfg.reward
+        r.velocity_tracking = 2.0
+        r.lateral_velocity = 0.0
+        r.yaw_rate = 0.0
+        r.upright = 2.0
+        r.height = 10.0
+        r.alive = 0.15
+        r.default_pose_tracking = 0.5
+        r.pose_mask = _MASK_UPPER.copy()
+        r.waist_stability = -2.0
+        r.arm_pose_penalty = -0.3
+        r.knee_symmetry = 0.0
+        r.angular_vel_penalty = -0.3
+        r.linear_vel_penalty = 0.0
+        r.action_smoothness = -0.15
+        r.action_magnitude = -0.01
+        r.torque_penalty = -1e-5
+        r.energy = -0.005
+        r.joint_limits = -5.0
+        r.feet_contact = 0.3
+        r.foot_clearance = 0.5
+        r.feet_air_time = 0.3
+
+        cfg.ppo.total_timesteps = 30_000_000
         return cfg
 
     @classmethod
     def stage_full_walk(cls) -> TrainingConfig:
         """Curriculum stage 3: full omnidirectional walking."""
-        return cls()  # default config is the full-walk config
+        cfg = cls()
+        cfg.env.episode_length = 5000           # 100 s
+        cfg.env.domain_rand = True
+        cfg.env.gyro_noise = 0.05
+        cfg.env.joint_pos_noise = 0.02
 
-    STAGES = ("stand", "slow_walk", "full_walk")
+        r = cfg.reward
+        r.velocity_tracking = 2.0
+        r.lateral_velocity = 1.0
+        r.yaw_rate = 0.5
+        r.upright = 1.5
+        r.height = 10.0
+        r.alive = 0.15
+        r.default_pose_tracking = 0.3
+        r.pose_mask = _MASK_UPPER.copy()
+        r.waist_stability = -1.5
+        r.arm_pose_penalty = -0.3
+        r.knee_symmetry = 0.0
+        r.angular_vel_penalty = -0.2
+        r.linear_vel_penalty = 0.0
+        r.action_smoothness = -0.1
+        r.action_magnitude = -0.01
+        r.torque_penalty = -1e-5
+        r.energy = -0.005
+        r.joint_limits = -5.0
+        r.feet_contact = 0.3
+        r.foot_clearance = 0.5
+        r.feet_air_time = 0.3
+
+        cfg.ppo.total_timesteps = 50_000_000
+        return cfg
+
+    STAGES = ("stand", "stand_phase2", "slow_walk", "full_walk")
 
     @classmethod
     def from_stage(cls, stage: str | None) -> TrainingConfig:
@@ -136,6 +281,7 @@ class TrainingConfig:
             return cls()
         _factories = {
             "stand": cls.stage_stand,
+            "stand_phase2": cls.stage_stand_phase2,
             "slow_walk": cls.stage_slow_walk,
             "full_walk": cls.stage_full_walk,
         }

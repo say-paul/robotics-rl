@@ -1,0 +1,12 @@
+FROM fedora:41
+RUN dnf install -y \
+        tigervnc-server-minimal novnc python3-websockify fluxbox procps-ng \
+    && dnf clean all
+COPY patch_novnc.sh /tmp/patch_novnc.sh
+RUN bash /tmp/patch_novnc.sh && rm /tmp/patch_novnc.sh
+EXPOSE 5900 6080
+CMD ["bash", "-c", "\
+  Xvnc :99 -geometry 1920x1080 -depth 24 -rfbport 5900 -SecurityTypes None -AlwaysShared & sleep 1 && \
+  DISPLAY=:99 fluxbox & sleep 0.5 && \
+  websockify --web=/usr/share/novnc 6080 localhost:5900 & \
+  echo 'Ready: VNC=5900 noVNC=6080' && wait"]

@@ -2,13 +2,16 @@
 
 Usage
 -----
-    # Full walk (default config)
-    python -m rl.train
-
-    # Curriculum stage 1 – standing
+    # Curriculum stage 1 – standing with human-like posture
     python -m rl.train --stage stand
 
-    # Fine-tune from a pretrained ONNX policy (skips curriculum!)
+    # Slow walk stage
+    python -m rl.train --stage slow_walk --pretrained policies/g1_joystick.onnx
+
+    # Full walk with domain randomization
+    python -m rl.train --stage full_walk
+
+    # Fine-tune from a pretrained ONNX policy
     python -m rl.train --pretrained policies/g1_joystick.onnx
 
     # Train on Intel Arc GPU (XPU)
@@ -17,8 +20,11 @@ Usage
     # Resume from a checkpoint
     python -m rl.train --resume rl/checkpoints/rl_model_2000000_steps.zip
 
-    # Override timesteps / envs
-    python -m rl.train --total-timesteps 10000000 --n-envs 8
+    # Override timesteps / envs / episode length
+    python -m rl.train --total-timesteps 10000000 --n-envs 8 --episode-length 3000
+
+    # Choose activation function
+    python -m rl.train --stage stand --activation silu
 """
 
 from __future__ import annotations
@@ -29,6 +35,7 @@ import os
 from pathlib import Path
 
 import torch
+import torch.nn as nn
 import numpy as np
 from stable_baselines3 import PPO
 from stable_baselines3.common.callbacks import (
@@ -45,33 +52,69 @@ from rl.import_onnx import import_onnx_into_ppo
 
 log = logging.getLogger(__name__)
 
+ACTIVATIONS = {
+    "tanh": nn.Tanh,
+    "silu": nn.SiLU,
+    "elu": nn.ELU,
+}
+
+
+class SaveVecNormOnBestCallback(BaseCallback):
+    """Save VecNormalize stats alongside best_model.zip every time
+    EvalCallback records a new best model."""
+
+    def __init__(self, verbose: int = 0):
+        super().__init__(verbose)
+        self._last_best_mean_reward = -float("inf")
+
+    def _on_step(self) -> bool:
+        if self.parent is None:
+            return True
+        eval_cb = None
+        for cb in self.parent.callbacks:
+            if isinstance(cb, EvalCallback):
+                eval_cb = cb
+                break
+        if eval_cb is None:
+            return True
+        if eval_cb.best_mean_reward > self._last_best_mean_reward:
+            self._last_best_mean_reward = eval_cb.best_mean_reward
+            env = self.model.get_env()
+            if isinstance(env, VecNormalize):
+                path = Path(eval_cb.best_model_save_path) / "best_model.vecnorm.pkl"
+                env.save(str(path))
+                if self.verbose:
+                    log.info("Saved VecNormalize alongside best_model -> %s", path)
+        return True
+
 
 class EpisodeLengthCeilingCallback(BaseCallback):
-    """Stop training once the eval mean episode length saturates at the ceiling.
+    """Stop training when eval episode length AND reward both plateau.
 
-    The *ceiling* is the environment's ``episode_length`` (max steps per
-    episode).  When the evaluation callback reports a ``mean_ep_length``
-    within ``tolerance`` of the ceiling for ``patience`` consecutive evals,
-    training is halted early.
+    Training stops when mean episode length is within ``tolerance`` of the
+    ceiling AND reward has not improved by more than ``reward_min_delta``
+    for ``patience`` consecutive evals.
     """
 
     def __init__(
         self,
         ceiling: int,
-        patience: int = 3,
+        patience: int = 5,
         tolerance: float = 5.0,
+        reward_min_delta: float = 0.5,
         verbose: int = 0,
     ):
         super().__init__(verbose)
         self.ceiling = ceiling
         self.patience = patience
         self.tolerance = tolerance
+        self.reward_min_delta = reward_min_delta
         self._streak = 0
+        self._best_reward = -float("inf")
 
     def _on_step(self) -> bool:
         if self.parent is None:
             return True
-        # EvalCallback stores results on itself after each evaluation round
         eval_cb = None
         for cb in self.parent.callbacks:
             if isinstance(cb, EvalCallback):
@@ -81,26 +124,38 @@ class EpisodeLengthCeilingCallback(BaseCallback):
             return True
 
         ep_lengths = eval_cb.evaluations_length_
+        ep_rewards = eval_cb.evaluations_results_ if hasattr(eval_cb, "evaluations_results_") else None
         if not ep_lengths:
             return True
 
-        last_mean = float(np.mean(ep_lengths[-1]))
-        if last_mean >= self.ceiling - self.tolerance:
-            self._streak += 1
-            if self.verbose:
-                log.info(
-                    "Ceiling check: mean_ep_length=%.1f (>= %.1f), streak %d/%d",
-                    last_mean, self.ceiling - self.tolerance,
-                    self._streak, self.patience,
-                )
-            if self._streak >= self.patience:
-                log.info(
-                    "Early stopping: episode length hit ceiling %d for %d consecutive evals",
-                    self.ceiling, self.patience,
-                )
-                return False
-        else:
+        last_mean_len = float(np.mean(ep_lengths[-1]))
+        last_mean_rew = eval_cb.last_mean_reward
+
+        at_ceiling = last_mean_len >= self.ceiling - self.tolerance
+        reward_improved = last_mean_rew > self._best_reward + self.reward_min_delta
+
+        if reward_improved:
+            self._best_reward = last_mean_rew
             self._streak = 0
+        elif at_ceiling:
+            self._streak += 1
+
+        if self.verbose:
+            log.info(
+                "Ceiling check: ep_len=%.0f  reward=%.1f  best=%.1f  "
+                "at_ceiling=%s  streak=%d/%d",
+                last_mean_len, last_mean_rew, self._best_reward,
+                at_ceiling, self._streak, self.patience,
+            )
+
+        if self._streak >= self.patience:
+            log.info(
+                "Early stopping: episode length at ceiling %d and reward "
+                "plateaued at %.1f for %d consecutive evals",
+                self.ceiling, self._best_reward, self.patience,
+            )
+            return False
+
         return True
 
 
@@ -145,6 +200,7 @@ def train(
     resume_path: str | None = None,
     pretrained_onnx: str | None = None,
     device: str = "auto",
+    action_scale_factor: float | None = None,
 ) -> Path:
     """Run PPO training and return the path to the final model."""
     dev = _resolve_device(device)
@@ -154,6 +210,9 @@ def train(
     os.makedirs(pcfg.log_dir, exist_ok=True)
     os.makedirs(pcfg.checkpoint_dir, exist_ok=True)
 
+    activation_fn = ACTIVATIONS.get(pcfg.activation, nn.SiLU)
+    log.info("Network arch: %s, activation: %s", pcfg.net_arch, pcfg.activation)
+
     log.info("Building %d parallel environments …", pcfg.n_envs)
     train_env = build_vec_env(cfg, pcfg.n_envs)
 
@@ -162,10 +221,54 @@ def train(
     if resume_path:
         log.info("Resuming from %s", resume_path)
         model = PPO.load(resume_path, env=train_env, device=dev)
-        vecnorm_path = Path(resume_path).with_suffix(".vecnorm.pkl")
-        if vecnorm_path.exists():
-            train_env = VecNormalize.load(str(vecnorm_path), train_env.venv)
-            model.set_env(train_env)
+
+        # --- Set fine-tuning learning rate ---
+        from stable_baselines3.common.utils import get_schedule_fn
+        ft_lr = pcfg.learning_rate
+        model.learning_rate = ft_lr
+        model.lr_schedule = get_schedule_fn(ft_lr)
+        for pg in model.policy.optimizer.param_groups:
+            pg["lr"] = ft_lr
+        log.info("Fine-tune LR set to %s (verified in optimizer + schedule)", ft_lr)
+
+        # --- Clamp policy log_std so exploration noise starts low ---
+        target_log_std = pcfg.log_std_init
+        with torch.no_grad():
+            old_std = model.policy.log_std.exp().mean().item()
+            model.policy.log_std.clamp_(max=target_log_std)
+            new_std = model.policy.log_std.exp().mean().item()
+        log.info(
+            "Clamped log_std: %.3f (std=%.3f) -> %.3f (std=%.3f)",
+            np.log(old_std), old_std, target_log_std, new_std,
+        )
+
+        # --- Optionally scale down action-net to reduce inherited large
+        #     action means.  Disabled by default; enable via --action-scale.
+        if action_scale_factor is not None and action_scale_factor != 1.0:
+            with torch.no_grad():
+                model.policy.action_net.weight.mul_(action_scale_factor)
+                model.policy.action_net.bias.mul_(action_scale_factor)
+            log.info(
+                "Scaled action_net weights by %.2f to reduce action means",
+                action_scale_factor,
+            )
+
+        rp = Path(resume_path)
+        vecnorm_candidates = [
+            rp.with_suffix(".vecnorm.pkl"),
+            rp.parent / rp.name.replace("rl_model_", "rl_model_vecnormalize_").replace(".zip", ".pkl"),
+        ]
+        for vp in vecnorm_candidates:
+            if vp.exists():
+                log.info("Loading VecNormalize from %s", vp)
+                train_env = VecNormalize.load(str(vp), train_env.venv)
+                eval_env = VecNormalize.load(str(vp), eval_env.venv)
+                eval_env.training = False
+                eval_env.norm_reward = False
+                model.set_env(train_env)
+                break
+        else:
+            log.warning("No VecNormalize found for %s", resume_path)
     elif pretrained_onnx:
         log.info("Importing pretrained ONNX policy from %s", pretrained_onnx)
         model = import_onnx_into_ppo(
@@ -201,7 +304,8 @@ def train(
             vf_coef=pcfg.vf_coef,
             max_grad_norm=pcfg.max_grad_norm,
             policy_kwargs=dict(
-                net_arch=pcfg.net_arch,
+                net_arch=dict(pi=pcfg.net_arch, vf=pcfg.net_arch),
+                activation_fn=activation_fn,
                 log_std_init=pcfg.log_std_init,
             ),
             tensorboard_log=pcfg.log_dir,
@@ -225,20 +329,24 @@ def train(
         save_vecnormalize=True,
     )
 
+    vecnorm_best_callback = SaveVecNormOnBestCallback(verbose=1)
+
     ceiling_callback = EpisodeLengthCeilingCallback(
         ceiling=cfg.env.episode_length,
-        patience=3,
+        patience=8,
+        reward_min_delta=0.3,
         tolerance=5.0,
         verbose=1,
     )
 
     log.info(
-        "Starting PPO training for %s timesteps …", f"{pcfg.total_timesteps:,}"
+        "Starting PPO training for %s timesteps (ep_length=%d) …",
+        f"{pcfg.total_timesteps:,}", cfg.env.episode_length,
     )
     model.learn(
         total_timesteps=pcfg.total_timesteps,
         callback=CallbackList(
-            [eval_callback, checkpoint_callback, ceiling_callback]
+            [eval_callback, checkpoint_callback, vecnorm_best_callback, ceiling_callback]
         ),
         progress_bar=True,
     )
@@ -277,6 +385,13 @@ def main() -> None:
     )
     parser.add_argument("--total-timesteps", type=int, default=None)
     parser.add_argument("--n-envs", type=int, default=None)
+    parser.add_argument("--episode-length", type=int, default=None)
+    parser.add_argument(
+        "--activation",
+        choices=list(ACTIVATIONS),
+        default=None,
+        help="Activation function (default from config: silu)",
+    )
     parser.add_argument("--seed", type=int, default=None)
     args = parser.parse_args()
 
@@ -286,6 +401,10 @@ def main() -> None:
         cfg.ppo.total_timesteps = args.total_timesteps
     if args.n_envs is not None:
         cfg.ppo.n_envs = args.n_envs
+    if args.episode_length is not None:
+        cfg.env.episode_length = args.episode_length
+    if args.activation is not None:
+        cfg.ppo.activation = args.activation
     if args.seed is not None:
         cfg.seed = args.seed
 

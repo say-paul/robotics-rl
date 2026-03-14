@@ -93,3 +93,74 @@ def feet_contact(
     elif phase_sin < 0:
         return float(right_contact and not left_contact)
     return 0.5 * float(left_contact or right_contact)
+
+
+# ---------------------------------------------------------------------------
+# Human-posture rewards
+# ---------------------------------------------------------------------------
+
+def default_pose_tracking(
+    joint_pos: NDArray, default_pos: NDArray, mask: NDArray,
+    scale: float = 2.0,
+) -> float:
+    """Gaussian reward for staying near the default pose.
+
+    *mask* is a per-joint weight (0 = ignore, 1 = enforce).  Use it to free
+    the legs during walking while keeping arms/waist constrained.
+    scale=2.0 gives wider reward basin so partial credit for being close.
+    """
+    diff = (joint_pos - default_pos) * mask
+    return float(np.exp(-scale * np.sum(diff ** 2)))
+
+
+def waist_stability(joint_pos: NDArray) -> float:
+    """Summed squared deviation of waist joints (indices 12-14) from zero."""
+    waist = joint_pos[12:15]
+    return float(np.sum(waist ** 2))
+
+
+def arm_pose_penalty(joint_pos: NDArray, default_pos: NDArray) -> float:
+    """Summed squared deviation of arm joints (indices 15-28) from default."""
+    arm_diff = joint_pos[15:] - default_pos[15:]
+    return float(np.sum(arm_diff ** 2))
+
+
+def knee_symmetry(joint_pos: NDArray) -> float:
+    """Summed squared difference between left and right leg joints (0-5 vs 6-11)."""
+    return float(np.sum((joint_pos[0:6] - joint_pos[6:12]) ** 2))
+
+
+def angular_velocity_penalty(gyro: NDArray) -> float:
+    """Summed squared body angular velocity -- penalises wobble."""
+    return float(np.sum(gyro ** 2))
+
+
+def linear_velocity_penalty(linvel_local: NDArray) -> float:
+    """Summed squared XY body velocity -- penalises drift during standing."""
+    return float(linvel_local[0] ** 2 + linvel_local[1] ** 2)
+
+
+def action_magnitude(action: NDArray) -> float:
+    """Summed squared action -- prefers minimal corrections."""
+    return float(np.sum(action ** 2))
+
+
+def torque_penalty(torques: NDArray) -> float:
+    """Summed squared torques -- encourages energy-efficient actuation."""
+    return float(np.sum(torques ** 2))
+
+
+def foot_clearance(
+    foot_z: float, is_swing: bool, target: float = 0.05,
+) -> float:
+    """Gaussian reward for lifting the swing foot to *target* metres."""
+    if not is_swing:
+        return 0.0
+    return float(np.exp(-100.0 * max(0.0, target - foot_z) ** 2))
+
+
+def feet_air_time(
+    contact_duration: float, min_duration: float = 0.2,
+) -> float:
+    """Reward for stance contact lasting at least *min_duration* seconds."""
+    return float(min(contact_duration / min_duration, 1.0))
