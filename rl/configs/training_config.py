@@ -44,6 +44,9 @@ class EnvConfig:
     # Phase oscillator
     phase_freq: float = 1.25         # Hz
 
+    # Command resampling: 0 = fixed per episode, >0 = resample every N steps
+    cmd_resample_interval: int = 0
+
     # Domain randomization
     domain_rand: bool = False
     friction_range: Tuple[float, float] = (0.5, 2.0)
@@ -82,6 +85,7 @@ class RewardConfig:
     angular_vel_penalty: float = 0.0
     linear_vel_penalty: float = 0.0
     action_smoothness: float = -0.05
+    action_acceleration: float = 0.0    # jerk penalty (second derivative of actions)
     action_magnitude: float = 0.0
     torque_penalty: float = 0.0
 
@@ -93,6 +97,18 @@ class RewardConfig:
     # Efficiency
     energy: float = -0.005
     joint_limits: float = -5.0
+
+    # Velocity tracking Gaussian tightness (higher = stricter)
+    velocity_tracking_scale: float = 4.0
+
+    # Trajectory-based rewards (v2) -- set displacement_tracking_weight > 0 to enable
+    displacement_tracking_weight: float = 0.0
+    heading_tracking_weight: float = 0.0
+    pace_tracking_weight: float = 0.0
+    posture_composite_weight: float = 0.0
+    displacement_window: int = 50     # sliding window in steps (50 * 0.02 = 1 second)
+    displacement_scale: float = 10.0  # Gaussian tightness for displacement/heading
+    pace_tolerance: float = 0.15      # 15% tolerance band for pace reward
 
     # Physical targets
     target_height: float = 0.68      # pelvis z for knees-bent stance
@@ -109,7 +125,7 @@ class PPOConfig:
     n_steps: int = 4096
     batch_size: int = 256
     n_epochs: int = 5
-    gamma: float = 0.99
+    gamma: float = 0.999
     gae_lambda: float = 0.95
     clip_range: float = 0.2
     ent_coef: float = 0.01
@@ -203,76 +219,202 @@ class TrainingConfig:
         return cfg
 
     @classmethod
-    def stage_slow_walk(cls) -> TrainingConfig:
-        """Curriculum stage 2: smooth forward walking with human gait."""
+    def stage_walk(cls) -> TrainingConfig:
+        """Omnidirectional walking at standard gait speed.
+
+        Strict rewards for:
+          - Precise velocity command tracking (forward, lateral, yaw)
+          - Smooth human-like gait with proper foot contact timing
+          - Stable upper body (arms at sides, waist locked)
+          - No excessive actions or jitter
+
+        Speed limited to ~0.5 m/s forward (standard walk, no running).
+        Commands resample every 10s so the policy learns to respond to
+        changing directions (keyboard joystick use-case).
+        """
         cfg = cls()
-        cfg.env.episode_length = 3000           # 60 s
-        cfg.env.cmd_vx_range = (0.0, 0.3)
-        cfg.env.cmd_vy_range = (0.0, 0.0)
-        cfg.env.cmd_vyaw_range = (0.0, 0.0)
+        cfg.env.episode_length = 4000           # 80 s
+        cfg.env.cmd_vx_range = (-0.3, 0.6)     # slow backward + natural forward walk
+        cfg.env.cmd_vy_range = (-0.3, 0.3)     # moderate strafing
+        cfg.env.cmd_vyaw_range = (-1.0, 1.0)   # full turning
+        cfg.env.cmd_resample_interval = 500     # resample every 10s
+        cfg.env.domain_rand = True
+        cfg.env.friction_range = (0.6, 1.5)
+        cfg.env.mass_range = (0.9, 1.1)
+        cfg.env.push_interval = (4.0, 8.0)
+        cfg.env.push_magnitude = 20.0
+        cfg.env.gyro_noise = 0.02
+        cfg.env.joint_pos_noise = 0.01
 
         r = cfg.reward
-        r.velocity_tracking = 2.0
-        r.lateral_velocity = 0.0
-        r.yaw_rate = 0.0
-        r.upright = 2.0
-        r.height = 10.0
-        r.alive = 0.15
-        r.default_pose_tracking = 0.5
+        # -- Command following: primary objective --
+        r.velocity_tracking = 6.0               # match forward speed precisely
+        r.lateral_velocity = 5.0                # match lateral speed precisely
+        r.yaw_rate = 5.0                        # match turn rate precisely
+        r.velocity_tracking_scale = 16.0        # TIGHT Gaussian: 24% at 0.3 m/s error
+
+        # -- Core stability --
+        r.upright = 4.0                         # stronger upright incentive
+        r.height = 6.0
+        r.alive = 1.0
+
+        # -- Upper body: lock arms/waist, free legs --
+        r.default_pose_tracking = 4.0           # doubled: enforce upper body pose
         r.pose_mask = _MASK_UPPER.copy()
-        r.waist_stability = -2.0
-        r.arm_pose_penalty = -0.3
-        r.knee_symmetry = 0.0
-        r.angular_vel_penalty = -0.3
-        r.linear_vel_penalty = 0.0
-        r.action_smoothness = -0.15
-        r.action_magnitude = -0.01
-        r.torque_penalty = -1e-5
+        r.waist_stability = -6.0                # doubled: no waist twist
+        r.arm_pose_penalty = -5.0               # doubled: arms at sides
+        r.knee_symmetry = 0.0                   # legs need asymmetry for gait
+
+        # -- Smooth walking, no jitter --
+        r.angular_vel_penalty = -2.0            # 4x: penalise body wobble hard
+        r.linear_vel_penalty = 0.0              # DON'T penalise walking velocity
+        r.action_smoothness = -0.5              # stronger: smooth transitions
+        r.action_magnitude = -0.05              # slightly larger to discourage wild swings
+        r.torque_penalty = -1e-4                # doubled
+
+        # -- Gait quality: proper alternating footsteps --
+        r.foot_clearance = 1.5
+        r.feet_contact = 1.5
+        r.feet_air_time = 1.0
+
+        # -- Efficiency --
         r.energy = -0.005
         r.joint_limits = -5.0
-        r.feet_contact = 0.3
-        r.foot_clearance = 0.5
-        r.feet_air_time = 0.3
 
+        cfg.ppo.learning_rate = 5e-5
+        cfg.ppo.ent_coef = 0.003                # lower entropy to keep std tight
         cfg.ppo.total_timesteps = 30_000_000
+        cfg.ppo.n_envs = 16
+        cfg.ppo.log_std_init = -1.5
+        cfg.ppo.gamma = 0.999
         return cfg
 
     @classmethod
-    def stage_full_walk(cls) -> TrainingConfig:
-        """Curriculum stage 3: full omnidirectional walking."""
+    def stage_walk_v2(cls) -> TrainingConfig:
+        """Trajectory-based walking with 7 simplified reward terms.
+
+        Replaces instantaneous velocity matching with displacement tracking
+        over a 1-second sliding window. Rewards WHERE the robot went,
+        WHETHER it arrived on time, and HOW its posture looked.
+        """
         cfg = cls()
-        cfg.env.episode_length = 5000           # 100 s
+        cfg.env.episode_length = 4000           # 80 s
+        cfg.env.cmd_vx_range = (-0.3, 0.6)
+        cfg.env.cmd_vy_range = (-0.3, 0.3)
+        cfg.env.cmd_vyaw_range = (-1.0, 1.0)
+        cfg.env.cmd_resample_interval = 500     # resample every 10s
         cfg.env.domain_rand = True
-        cfg.env.gyro_noise = 0.05
-        cfg.env.joint_pos_noise = 0.02
+        cfg.env.friction_range = (0.6, 1.5)
+        cfg.env.mass_range = (0.9, 1.1)
+        cfg.env.push_interval = (4.0, 8.0)
+        cfg.env.push_magnitude = 20.0
+        cfg.env.gyro_noise = 0.02
+        cfg.env.joint_pos_noise = 0.01
 
         r = cfg.reward
-        r.velocity_tracking = 2.0
-        r.lateral_velocity = 1.0
-        r.yaw_rate = 0.5
-        r.upright = 1.5
-        r.height = 10.0
-        r.alive = 0.15
-        r.default_pose_tracking = 0.3
-        r.pose_mask = _MASK_UPPER.copy()
-        r.waist_stability = -1.5
-        r.arm_pose_penalty = -0.3
-        r.knee_symmetry = 0.0
-        r.angular_vel_penalty = -0.2
-        r.linear_vel_penalty = 0.0
-        r.action_smoothness = -0.1
-        r.action_magnitude = -0.01
-        r.torque_penalty = -1e-5
-        r.energy = -0.005
-        r.joint_limits = -5.0
-        r.feet_contact = 0.3
-        r.foot_clearance = 0.5
-        r.feet_air_time = 0.3
 
-        cfg.ppo.total_timesteps = 50_000_000
+        # -- Trajectory rewards (the core 3) --
+        r.displacement_tracking_weight = 8.0    # did the robot go where it should?
+        r.heading_tracking_weight = 6.0         # is the robot facing correctly?
+        r.pace_tracking_weight = 5.0            # did it arrive on time? (15% tolerance)
+        r.displacement_window = 50              # 1-second sliding window
+        r.displacement_scale = 10.0
+        r.pace_tolerance = 0.15
+
+        # -- Posture (single composite term) --
+        r.posture_composite_weight = 5.0        # upright * height * upper-body
+
+        # -- Disable legacy instantaneous velocity tracking --
+        r.velocity_tracking = 0.0
+        r.lateral_velocity = 0.0
+        r.yaw_rate = 0.0
+        r.upright = 0.0
+        r.height = 0.0
+        r.default_pose_tracking = 0.0
+        r.waist_stability = 0.0
+        r.arm_pose_penalty = 0.0
+        r.knee_symmetry = 0.0
+        r.angular_vel_penalty = 0.0
+        r.linear_vel_penalty = 0.0
+        r.action_magnitude = 0.0
+        r.torque_penalty = 0.0
+
+        # -- Alive bonus --
+        r.alive = 2.0
+
+        # -- Smoothness --
+        r.action_smoothness = -0.5
+
+        # -- Gait quality --
+        r.feet_contact = 2.0
+        r.foot_clearance = 0.0
+        r.feet_air_time = 0.0
+
+        # -- Efficiency --
+        r.energy = -0.003
+        r.joint_limits = -3.0
+
+        # -- PPO hyperparameters --
+        cfg.ppo.learning_rate = 3e-5
+        cfg.ppo.ent_coef = 0.0                  # ZERO entropy: prevent std explosion
+        cfg.ppo.total_timesteps = 30_000_000
+        cfg.ppo.n_envs = 16
+        cfg.ppo.log_std_init = -1.0             # std ceiling = 0.37
+        cfg.ppo.gamma = 0.998
+        cfg.ppo.eval_freq = 500_000             # less frequent evals (long episodes)
+        cfg.ppo.eval_episodes = 5               # fewer eval episodes
         return cfg
 
-    STAGES = ("stand", "stand_phase2", "slow_walk", "full_walk")
+    @classmethod
+    def stage_walk_v3(cls) -> TrainingConfig:
+        """Refined walking: fine-tune from walk_v2 best model.
+
+        Fixes: high clip_fraction/KL by lowering LR and n_epochs.
+        Adds foot_clearance, feet_air_time, action_acceleration (jerk)
+        to reduce shuffling and upper-body jitter.
+        """
+        cfg = cls.stage_walk_v2()
+
+        # -- Fix over-aggressive updates --
+        cfg.ppo.learning_rate = 1e-5
+        cfg.ppo.n_epochs = 3
+        cfg.ppo.total_timesteps = 20_000_000
+
+        # -- Gait quality: teach proper foot lifting --
+        r = cfg.reward
+        r.foot_clearance = 1.5
+        r.feet_air_time = 1.0
+
+        # -- Stronger smoothness + jerk penalty --
+        r.action_smoothness = -2.0
+        r.action_acceleration = -1.0
+
+        # -- Stronger posture to match trajectory reward scale --
+        r.posture_composite_weight = 8.0
+
+        # -- Stronger efficiency --
+        r.energy = -0.005
+
+        # -- Gentler pushes during refinement, faster command resampling --
+        cfg.env.push_magnitude = 15.0
+        cfg.env.cmd_resample_interval = 200
+
+        # -- n_envs = 8 to avoid OOM --
+        cfg.ppo.n_envs = 8
+
+        return cfg
+
+    @classmethod
+    def stage_slow_walk(cls) -> TrainingConfig:
+        """Legacy: forward-only walking. Use stage_walk instead."""
+        return cls.stage_walk()
+
+    @classmethod
+    def stage_full_walk(cls) -> TrainingConfig:
+        """Legacy: omnidirectional walking. Use stage_walk instead."""
+        return cls.stage_walk()
+
+    STAGES = ("stand", "stand_phase2", "walk", "walk_v2", "walk_v3", "slow_walk", "full_walk")
 
     @classmethod
     def from_stage(cls, stage: str | None) -> TrainingConfig:
@@ -282,6 +424,9 @@ class TrainingConfig:
         _factories = {
             "stand": cls.stage_stand,
             "stand_phase2": cls.stage_stand_phase2,
+            "walk": cls.stage_walk,
+            "walk_v2": cls.stage_walk_v2,
+            "walk_v3": cls.stage_walk_v3,
             "slow_walk": cls.stage_slow_walk,
             "full_walk": cls.stage_full_walk,
         }

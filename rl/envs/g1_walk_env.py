@@ -118,6 +118,7 @@ class G1WalkEnv(gym.Env):
         # Per-episode state
         self._step_count = 0
         self._last_action = np.zeros(ACT_DIM, dtype=np.float32)
+        self._prev_prev_action = np.zeros(ACT_DIM, dtype=np.float32)
         self._command = np.zeros(3, dtype=np.float32)
         self._phase = np.zeros(2, dtype=np.float64)
         self._phase_dt = 2.0 * math.pi * self._env_cfg.policy_dt * self._env_cfg.phase_freq
@@ -125,6 +126,15 @@ class G1WalkEnv(gym.Env):
         # Foot contact duration tracking (for feet_air_time reward)
         self._left_contact_time = 0.0
         self._right_contact_time = 0.0
+
+        # Trajectory tracking buffers (for displacement/heading/pace rewards)
+        W = self._reward_cfg.displacement_window
+        self._traj_window = W
+        self._pos_buffer = np.zeros((W, 2), dtype=np.float64)
+        self._heading_buffer = np.zeros(W, dtype=np.float64)
+        self._cmd_buffer = np.zeros((W, 3), dtype=np.float64)
+        self._buf_idx = 0
+        self._buf_full = False
 
         # Domain randomization: next push time
         self._next_push_time = float("inf")
@@ -201,10 +211,18 @@ class G1WalkEnv(gym.Env):
         self._command[2] = rng.uniform(*ecfg.cmd_vyaw_range)
 
         self._last_action = np.zeros(ACT_DIM, dtype=np.float32)
+        self._prev_prev_action = np.zeros(ACT_DIM, dtype=np.float32)
         self._phase[:] = [0.0, math.pi]
         self._step_count = 0
         self._left_contact_time = 0.0
         self._right_contact_time = 0.0
+
+        # Reset trajectory buffers
+        self._pos_buffer[:] = 0.0
+        self._heading_buffer[:] = 0.0
+        self._cmd_buffer[:] = 0.0
+        self._buf_idx = 0
+        self._buf_full = False
 
         return self._get_obs(), self._get_info()
 
@@ -220,12 +238,22 @@ class G1WalkEnv(gym.Env):
 
         self._step_count += 1
 
+        # Resample velocity commands periodically so policy learns to respond
+        interval = self._env_cfg.cmd_resample_interval
+        if interval > 0 and self._step_count % interval == 0 and self._step_count > 0:
+            ecfg = self._env_cfg
+            self._command[0] = self.np_random.uniform(*ecfg.cmd_vx_range)
+            self._command[1] = self.np_random.uniform(*ecfg.cmd_vy_range)
+            self._command[2] = self.np_random.uniform(*ecfg.cmd_vyaw_range)
+
         # Domain randomization: external push perturbation
         sim_time = self._step_count * self._env_cfg.policy_dt
         if self._env_cfg.domain_rand and sim_time >= self._next_push_time:
             self._apply_push()
             push_lo, push_hi = self._env_cfg.push_interval
             self._next_push_time = sim_time + self.np_random.uniform(push_lo, push_hi)
+
+        self._record_trajectory()
 
         obs = self._get_obs()
         reward, reward_info = self._compute_reward(action)
@@ -236,6 +264,7 @@ class G1WalkEnv(gym.Env):
         self._phase += self._phase_dt
         self._phase = np.fmod(self._phase + math.pi, 2 * math.pi) - math.pi
 
+        self._prev_prev_action = self._last_action.copy()
         self._last_action = action.astype(np.float32)
 
         info = self._get_info()
@@ -259,6 +288,23 @@ class G1WalkEnv(gym.Env):
     # ------------------------------------------------------------------
     # Internals
     # ------------------------------------------------------------------
+
+    @staticmethod
+    def _quat_to_yaw(quat: NDArray) -> float:
+        """Extract yaw angle from quaternion (w, x, y, z)."""
+        w, x, y, z = quat
+        return math.atan2(2.0 * (w * z + x * y), 1.0 - 2.0 * (y * y + z * z))
+
+    def _record_trajectory(self) -> None:
+        """Store current position, heading, and command in circular buffers."""
+        idx = self._buf_idx % self._traj_window
+        self._pos_buffer[idx, 0] = self.data.qpos[0]
+        self._pos_buffer[idx, 1] = self.data.qpos[1]
+        self._heading_buffer[idx] = self._quat_to_yaw(self.data.qpos[3:7])
+        self._cmd_buffer[idx] = self._command
+        self._buf_idx += 1
+        if self._buf_idx >= self._traj_window:
+            self._buf_full = True
 
     def _apply_pd_control(self, q_target: NDArray) -> None:
         q = self.data.qpos[7:]
@@ -335,13 +381,6 @@ class G1WalkEnv(gym.Env):
             -(w * w - x * x - y * y + z * z),
         ])
 
-        rot_mat = np.zeros(9, dtype=np.float64)
-        mujoco.mju_quat2Mat(rot_mat, quat)
-        rot = rot_mat.reshape(3, 3)
-        linvel_local = rot.T @ self.data.qvel[:3]
-        gyro = self.data.qvel[3:6]
-        ang_vel_z = self.data.qvel[5]
-
         pelvis_z = self.data.qpos[2]
         joint_pos = self.data.qpos[7:]
         joint_vel = self.data.qvel[6:]
@@ -363,50 +402,129 @@ class G1WalkEnv(gym.Env):
 
         components: Dict[str, float] = {}
 
-        # Velocity tracking
-        components["velocity_tracking"] = cfg.velocity_tracking * rewards.velocity_tracking(
-            linvel_local, self._command[0]
-        )
-        components["lateral_velocity"] = cfg.lateral_velocity * rewards.lateral_velocity(
-            linvel_local, self._command[1]
-        )
-        components["yaw_rate"] = cfg.yaw_rate * rewards.yaw_rate(
-            ang_vel_z, self._command[2]
-        )
+        # ---- Trajectory-based rewards (v2) ----
+        use_trajectory = cfg.displacement_tracking_weight > 0.0
 
-        # Core stability
-        components["upright"] = cfg.upright * rewards.upright(gravity_proj)
-        components["height"] = cfg.height * rewards.height(pelvis_z, cfg.target_height)
+        if use_trajectory and self._buf_full:
+            oldest_idx = self._buf_idx % self._traj_window
+            cur_pos = np.array([self.data.qpos[0], self.data.qpos[1]])
+            old_pos = self._pos_buffer[oldest_idx]
+            actual_disp = cur_pos - old_pos
+
+            cur_heading = self._quat_to_yaw(quat)
+            old_heading = self._heading_buffer[oldest_idx]
+            actual_yaw_change = cur_heading - old_heading
+            actual_yaw_change = (actual_yaw_change + math.pi) % (2 * math.pi) - math.pi
+
+            # Average command over the window for expected displacement
+            avg_cmd = np.mean(self._cmd_buffer, axis=0)
+            window_time = self._traj_window * dt
+            avg_heading = (cur_heading + old_heading) / 2.0
+            ch, sh = math.cos(avg_heading), math.sin(avg_heading)
+            expected_disp = np.array([
+                avg_cmd[0] * ch - avg_cmd[1] * sh,
+                avg_cmd[0] * sh + avg_cmd[1] * ch,
+            ]) * window_time
+
+            expected_yaw_change = avg_cmd[2] * window_time
+
+            actual_dist = float(np.linalg.norm(actual_disp))
+            expected_dist = float(np.linalg.norm(expected_disp))
+
+            dscale = cfg.displacement_scale
+            components["displacement_tracking"] = (
+                cfg.displacement_tracking_weight
+                * rewards.displacement_tracking(actual_disp, expected_disp, scale=dscale)
+            )
+            components["heading_tracking"] = (
+                cfg.heading_tracking_weight
+                * rewards.heading_tracking(actual_yaw_change, expected_yaw_change, scale=dscale)
+            )
+            components["pace_tracking"] = (
+                cfg.pace_tracking_weight
+                * rewards.pace_tracking(actual_dist, expected_dist, tolerance=cfg.pace_tolerance)
+            )
+
+        elif use_trajectory and not self._buf_full:
+            # Warm-up: give baseline reward so policy isn't punished before buffer fills
+            components["displacement_tracking"] = cfg.displacement_tracking_weight * 0.5
+            components["heading_tracking"] = cfg.heading_tracking_weight * 0.5
+            components["pace_tracking"] = cfg.pace_tracking_weight * 0.5
+
+        else:
+            # Legacy instantaneous velocity tracking (for stand stages)
+            rot_mat = np.zeros(9, dtype=np.float64)
+            mujoco.mju_quat2Mat(rot_mat, quat)
+            rot = rot_mat.reshape(3, 3)
+            linvel_local = rot.T @ self.data.qvel[:3]
+            ang_vel_z = self.data.qvel[5]
+            vscale = cfg.velocity_tracking_scale
+
+            components["velocity_tracking"] = cfg.velocity_tracking * rewards.velocity_tracking(
+                linvel_local, self._command[0], scale=vscale
+            )
+            components["lateral_velocity"] = cfg.lateral_velocity * rewards.lateral_velocity(
+                linvel_local, self._command[1], scale=vscale
+            )
+            components["yaw_rate"] = cfg.yaw_rate * rewards.yaw_rate(
+                ang_vel_z, self._command[2], scale=vscale
+            )
+
+        # ---- Posture ----
+        if cfg.posture_composite_weight > 0.0:
+            waist_dev = float(np.sum(joint_pos[12:15] ** 2))
+            arm_diff = joint_pos[15:] - self._default_pos[15:]
+            arm_dev = float(np.sum(arm_diff ** 2))
+            upper_dev = waist_dev + arm_dev
+            components["posture_composite"] = (
+                cfg.posture_composite_weight
+                * rewards.posture_composite(gravity_proj, pelvis_z, cfg.target_height, upper_dev)
+            )
+        else:
+            # Legacy separate posture terms
+            components["upright"] = cfg.upright * rewards.upright(gravity_proj)
+            components["height"] = cfg.height * rewards.height(pelvis_z, cfg.target_height)
+            if cfg.default_pose_tracking != 0.0:
+                components["default_pose_tracking"] = cfg.default_pose_tracking * rewards.default_pose_tracking(
+                    joint_pos, self._default_pos, cfg.pose_mask
+                )
+            if cfg.waist_stability != 0.0:
+                components["waist_stability"] = cfg.waist_stability * rewards.waist_stability(joint_pos)
+            if cfg.arm_pose_penalty != 0.0:
+                components["arm_pose_penalty"] = cfg.arm_pose_penalty * rewards.arm_pose_penalty(
+                    joint_pos, self._default_pos
+                )
+            if cfg.knee_symmetry != 0.0:
+                components["knee_symmetry"] = cfg.knee_symmetry * rewards.knee_symmetry(joint_pos)
+
+        # ---- Alive bonus ----
         components["alive"] = cfg.alive * rewards.alive()
 
-        # Human-posture enforcement
-        if cfg.default_pose_tracking != 0.0:
-            components["default_pose_tracking"] = cfg.default_pose_tracking * rewards.default_pose_tracking(
-                joint_pos, self._default_pos, cfg.pose_mask
-            )
-        if cfg.waist_stability != 0.0:
-            components["waist_stability"] = cfg.waist_stability * rewards.waist_stability(joint_pos)
-        if cfg.arm_pose_penalty != 0.0:
-            components["arm_pose_penalty"] = cfg.arm_pose_penalty * rewards.arm_pose_penalty(
-                joint_pos, self._default_pos
-            )
-        if cfg.knee_symmetry != 0.0:
-            components["knee_symmetry"] = cfg.knee_symmetry * rewards.knee_symmetry(joint_pos)
-
-        # Anti-jitter
-        if cfg.angular_vel_penalty != 0.0:
-            components["angular_vel_penalty"] = cfg.angular_vel_penalty * rewards.angular_velocity_penalty(gyro)
-        if cfg.linear_vel_penalty != 0.0:
-            components["linear_vel_penalty"] = cfg.linear_vel_penalty * rewards.linear_velocity_penalty(linvel_local)
+        # ---- Smoothness ----
         components["action_smoothness"] = cfg.action_smoothness * rewards.action_smoothness(
             action, self._last_action
         )
+        if cfg.action_acceleration != 0.0:
+            components["action_acceleration"] = cfg.action_acceleration * rewards.action_acceleration(
+                action, self._last_action, self._prev_prev_action
+            )
+
+        # ---- Legacy penalties (active only when weights non-zero) ----
+        if cfg.angular_vel_penalty != 0.0:
+            gyro = self.data.qvel[3:6]
+            components["angular_vel_penalty"] = cfg.angular_vel_penalty * rewards.angular_velocity_penalty(gyro)
+        if cfg.linear_vel_penalty != 0.0:
+            rot_mat = np.zeros(9, dtype=np.float64)
+            mujoco.mju_quat2Mat(rot_mat, quat)
+            rot = rot_mat.reshape(3, 3)
+            linvel_local = rot.T @ self.data.qvel[:3]
+            components["linear_vel_penalty"] = cfg.linear_vel_penalty * rewards.linear_velocity_penalty(linvel_local)
         if cfg.action_magnitude != 0.0:
             components["action_magnitude"] = cfg.action_magnitude * rewards.action_magnitude(action)
         if cfg.torque_penalty != 0.0:
             components["torque_penalty"] = cfg.torque_penalty * rewards.torque_penalty(torques)
 
-        # Gait quality
+        # ---- Gait quality ----
         if cfg.foot_clearance != 0.0:
             left_swing = phase_sin < 0
             right_swing = phase_sin > 0
@@ -424,15 +542,18 @@ class G1WalkEnv(gym.Env):
                 stance_dur += rewards.feet_air_time(self._right_contact_time)
             components["feet_air_time"] = cfg.feet_air_time * stance_dur
 
-        components["feet_contact"] = cfg.feet_contact * rewards.feet_contact(
-            left_contact, right_contact, phase_sin
-        )
+        if cfg.feet_contact != 0.0:
+            components["feet_contact"] = cfg.feet_contact * rewards.feet_contact(
+                left_contact, right_contact, phase_sin
+            )
 
-        # Efficiency
-        components["energy"] = cfg.energy * rewards.energy(torques, joint_vel)
-        components["joint_limits"] = cfg.joint_limits * rewards.joint_limits(
-            joint_pos, self._jnt_range_lo, self._jnt_range_hi
-        )
+        # ---- Efficiency ----
+        if cfg.energy != 0.0:
+            components["energy"] = cfg.energy * rewards.energy(torques, joint_vel)
+        if cfg.joint_limits != 0.0:
+            components["joint_limits"] = cfg.joint_limits * rewards.joint_limits(
+                joint_pos, self._jnt_range_lo, self._jnt_range_hi
+            )
 
         total = sum(components.values())
         return float(total), components

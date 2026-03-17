@@ -33,6 +33,41 @@ from rl.envs.g1_walk_env import G1WalkEnv, OBS_DIM
 log = logging.getLogger(__name__)
 
 
+def _find_matching_vecnorm(model_path: Path) -> Path:
+    """Find the VecNormalize .pkl that matches a model .zip by timestamp.
+
+    Priority:
+      1. Exact sibling: model_path.with_suffix('.vecnorm.pkl')
+         -- but only if its mtime is within 120s of the model
+      2. Checkpoint vecnorm with closest mtime to the model
+      3. Fall back to the sibling path (may not exist)
+    """
+    sibling = model_path.with_suffix(".vecnorm.pkl")
+    model_mtime = model_path.stat().st_mtime if model_path.exists() else 0
+
+    if sibling.exists():
+        dt = abs(sibling.stat().st_mtime - model_mtime)
+        if dt < 120:
+            log.info("VecNormalize sibling matches (dt=%.0fs): %s", dt, sibling)
+            return sibling
+        log.warning(
+            "VecNormalize sibling is STALE (dt=%.0fs). Searching for closer match...", dt
+        )
+
+    checkpoint_vns = sorted(
+        model_path.parent.glob("rl_model_vecnormalize_*_steps.pkl"),
+        key=lambda p: abs(p.stat().st_mtime - model_mtime),
+    )
+    if checkpoint_vns:
+        best = checkpoint_vns[0]
+        dt = abs(best.stat().st_mtime - model_mtime)
+        log.info("Using closest checkpoint VecNormalize (dt=%.0fs): %s", dt, best)
+        return best
+
+    log.info("Using sibling VecNormalize (no checkpoint alternatives): %s", sibling)
+    return sibling
+
+
 class NormalizedPolicy(nn.Module):
     """Wraps the SB3 actor with observation normalisation so the ONNX graph
     includes the running-mean / running-var statistics and outputs
@@ -68,10 +103,7 @@ def export(
     cfg = cfg or TrainingConfig()
     raw_env = DummyVecEnv([lambda: G1WalkEnv(env_cfg=cfg.env, reward_cfg=cfg.reward)])
 
-    vecnorm_path = Path(model_path).with_suffix(".vecnorm.pkl")
-    if not vecnorm_path.exists():
-        candidates = list(Path(model_path).parent.glob("*.vecnorm.pkl"))
-        vecnorm_path = candidates[0] if candidates else vecnorm_path
+    vecnorm_path = _find_matching_vecnorm(Path(model_path))
 
     model = PPO.load(model_path)
 

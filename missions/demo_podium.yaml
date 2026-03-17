@@ -1,0 +1,51 @@
+# Demo mission: walk to podium, climb stairs, perform action, return.
+# Format follows ROS2 Nav2 waypoint conventions for easy migration.
+#
+# Run: python -m planner.mission_runner --mission missions/demo_podium.yaml
+
+mission:
+  name: "podium_demo"
+  frame_id: "world"
+  waypoints:
+    - id: "start"
+      pose: {x: 0.0, y: 0.0, yaw: 0.0}
+      behavior: "walk"
+      speed: 0.4
+      arrival_radius: 0.3
+
+    - id: "stair_approach"
+      pose: {x: 5.0, y: 0.0, yaw: 0.0}
+      behavior: "walk"
+      speed: 0.2
+      arrival_radius: 0.2
+
+    - id: "podium_top"
+      pose: {x: 7.0, y: 0.0, yaw: 0.0}
+      behavior: "climb"
+      speed: 0.1
+      arrival_radius: 0.3
+
+    - id: "center_stage"
+      pose: {x: 8.0, y: 2.0, yaw: 1.57}
+      behavior: "walk"
+      speed: 0.3
+      arrival_radius: 0.2
+      on_arrive: "handshake"
+
+    - id: "podium_edge"
+      pose: {x: 7.0, y: 2.0, yaw: 3.14}
+      behavior: "walk"
+      speed: 0.2
+      arrival_radius: 0.2
+
+    - id: "stair_descent"
+      pose: {x: 5.0, y: 2.0, yaw: 3.14}
+      behavior: "descend"
+      speed: 0.1
+      arrival_radius: 0.3
+
+    - id: "destination"
+      pose: {x: 0.0, y: 2.0, yaw: 3.14}
+      behavior: "walk"
+      speed: 0.4
+      arrival_radius: 0.5

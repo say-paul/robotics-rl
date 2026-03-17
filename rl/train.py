@@ -61,30 +61,51 @@ ACTIVATIONS = {
 
 class SaveVecNormOnBestCallback(BaseCallback):
     """Save VecNormalize stats alongside best_model.zip every time
-    EvalCallback records a new best model."""
+    EvalCallback records a new best model.
 
-    def __init__(self, verbose: int = 0):
+    Watches the best_model.zip mtime to detect saves reliably,
+    independent of callback ordering or parent references.
+    """
+
+    def __init__(self, save_dir: str, verbose: int = 0):
         super().__init__(verbose)
-        self._last_best_mean_reward = -float("inf")
+        self._best_path = Path(save_dir) / "best_model.zip"
+        self._last_mtime: float = 0.0
+
+    def _init_callback(self) -> None:
+        if self._best_path.exists():
+            self._last_mtime = self._best_path.stat().st_mtime
 
     def _on_step(self) -> bool:
-        if self.parent is None:
+        if not self._best_path.exists():
             return True
-        eval_cb = None
-        for cb in self.parent.callbacks:
-            if isinstance(cb, EvalCallback):
-                eval_cb = cb
-                break
-        if eval_cb is None:
-            return True
-        if eval_cb.best_mean_reward > self._last_best_mean_reward:
-            self._last_best_mean_reward = eval_cb.best_mean_reward
+        mtime = self._best_path.stat().st_mtime
+        if mtime > self._last_mtime:
+            self._last_mtime = mtime
             env = self.model.get_env()
             if isinstance(env, VecNormalize):
-                path = Path(eval_cb.best_model_save_path) / "best_model.vecnorm.pkl"
-                env.save(str(path))
-                if self.verbose:
-                    log.info("Saved VecNormalize alongside best_model -> %s", path)
+                vn_path = self._best_path.with_suffix(".vecnorm.pkl")
+                env.save(str(vn_path))
+                log.info("Saved VecNormalize -> %s (best_model updated)", vn_path)
+        return True
+
+
+class StdClampCallback(BaseCallback):
+    """Hard-clamp policy log_std every N steps to prevent std explosion.
+
+    Without this, entropy bonus (even tiny ent_coef) pushes std upward
+    monotonically over millions of steps, eventually making actions random.
+    """
+
+    def __init__(self, max_log_std: float = -1.0, clamp_every: int = 10, verbose: int = 0):
+        super().__init__(verbose)
+        self.max_log_std = max_log_std
+        self.clamp_every = clamp_every
+
+    def _on_step(self) -> bool:
+        if self.n_calls % self.clamp_every == 0:
+            with torch.no_grad():
+                self.model.policy.log_std.clamp_(max=self.max_log_std)
         return True
 
 
@@ -231,6 +252,12 @@ def train(
             pg["lr"] = ft_lr
         log.info("Fine-tune LR set to %s (verified in optimizer + schedule)", ft_lr)
 
+        # --- Override gamma if config differs from checkpoint ---
+        if model.gamma != pcfg.gamma:
+            old_gamma = model.gamma
+            model.gamma = pcfg.gamma
+            log.info("Updated gamma: %s -> %s", old_gamma, pcfg.gamma)
+
         # --- Clamp policy log_std so exploration noise starts low ---
         target_log_std = pcfg.log_std_init
         with torch.no_grad():
@@ -289,6 +316,13 @@ def train(
             seed=cfg.seed,
             verbose=1,
         )
+        # Sync VecNormalize stats from train_env -> eval_env so eval uses
+        # the correct observation normalization from the pretrained model.
+        eval_env.obs_rms = train_env.obs_rms
+        eval_env.ret_rms = train_env.ret_rms
+        eval_env.training = False
+        eval_env.norm_reward = False
+        log.info("Synced VecNormalize stats to eval_env (training=False, norm_reward=False)")
     else:
         model = PPO(
             "MlpPolicy",
@@ -329,7 +363,13 @@ def train(
         save_vecnormalize=True,
     )
 
-    vecnorm_best_callback = SaveVecNormOnBestCallback(verbose=1)
+    vecnorm_best_callback = SaveVecNormOnBestCallback(save_dir=pcfg.checkpoint_dir, verbose=1)
+
+    std_clamp_callback = StdClampCallback(
+        max_log_std=pcfg.log_std_init,
+        clamp_every=10,
+        verbose=0,
+    )
 
     ceiling_callback = EpisodeLengthCeilingCallback(
         ceiling=cfg.env.episode_length,
@@ -346,7 +386,8 @@ def train(
     model.learn(
         total_timesteps=pcfg.total_timesteps,
         callback=CallbackList(
-            [eval_callback, checkpoint_callback, vecnorm_best_callback, ceiling_callback]
+            [eval_callback, checkpoint_callback, vecnorm_best_callback,
+             std_clamp_callback, ceiling_callback]
         ),
         progress_bar=True,
     )

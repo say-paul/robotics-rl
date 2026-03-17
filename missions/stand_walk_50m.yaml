@@ -1,0 +1,38 @@
+# Stand to stabilize, then walk 50m in a straight line.
+#
+# Usage:
+#   DISPLAY=:99 python3 vnc/sim_viewer.py --mission missions/stand_walk_50m.yaml
+#   Then press M to start the mission.
+
+mission:
+  name: "stand_then_walk_50m"
+  policies:
+    stand: "policies/g1_stand_v5.onnx"
+    walk: "policies/g1_walk_v5.onnx"
+  waypoints:
+    - id: "stabilize1"
+      pose: {x: 0, y: 0, yaw: 0}
+      behavior: "stand"
+      hold_duration: 10.0
+
+    - id: "destination1"
+      pose: {x: 50, y: 0, yaw: 0}
+      behavior: "walk"
+      speed: 0.5
+      arrival_radius: 0.5
+
+    - id: "stabilize2"
+      pose: {x: 0, y: 0, yaw: 0}
+      behavior: "stand"
+      hold_duration: 10.0
+
+    - id: "destination2"
+      pose: {x: 25, y: 0, yaw: 0}
+      behavior: "walk"
+      speed: 0.4
+      arrival_radius: 0.5
+
+    - id: "stabilize3"
+      pose: {x: 0, y: 0, yaw: 0}
+      behavior: "stand"
+      hold_duration: 5.0

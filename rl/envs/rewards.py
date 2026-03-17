@@ -11,24 +11,29 @@ from numpy.typing import NDArray
 
 
 def velocity_tracking(
-    body_vel_local: NDArray, cmd_vx: float
+    body_vel_local: NDArray, cmd_vx: float, scale: float = 4.0
 ) -> float:
-    """Exponential reward for matching commanded forward speed."""
-    return float(np.exp(-4.0 * (body_vel_local[0] - cmd_vx) ** 2))
+    """Exponential reward for matching commanded forward speed.
+
+    Higher *scale* makes the Gaussian narrower → stricter tracking.
+    scale=4  → 70% reward at 0.3 m/s error (lenient)
+    scale=16 → 24% reward at 0.3 m/s error (strict)
+    """
+    return float(np.exp(-scale * (body_vel_local[0] - cmd_vx) ** 2))
 
 
 def lateral_velocity(
-    body_vel_local: NDArray, cmd_vy: float
+    body_vel_local: NDArray, cmd_vy: float, scale: float = 4.0
 ) -> float:
     """Exponential reward for matching commanded lateral speed."""
-    return float(np.exp(-4.0 * (body_vel_local[1] - cmd_vy) ** 2))
+    return float(np.exp(-scale * (body_vel_local[1] - cmd_vy) ** 2))
 
 
 def yaw_rate(
-    angular_vel_z: float, cmd_vyaw: float
+    angular_vel_z: float, cmd_vyaw: float, scale: float = 4.0
 ) -> float:
     """Exponential reward for matching commanded yaw rate."""
-    return float(np.exp(-4.0 * (angular_vel_z - cmd_vyaw) ** 2))
+    return float(np.exp(-scale * (angular_vel_z - cmd_vyaw) ** 2))
 
 
 def upright(gravity_projected: NDArray) -> float:
@@ -57,6 +62,19 @@ def action_smoothness(
 ) -> float:
     """Squared difference between consecutive actions."""
     return float(np.sum((action - prev_action) ** 2))
+
+
+def action_acceleration(
+    action: NDArray, prev_action: NDArray, prev_prev_action: NDArray
+) -> float:
+    """Squared second derivative of actions (jerk penalty).
+
+    Penalises oscillation and abrupt direction changes while allowing
+    steady movements.  ``a_t - 2*a_{t-1} + a_{t-2}`` is the discrete
+    second difference.
+    """
+    accel = action - 2.0 * prev_action + prev_prev_action
+    return float(np.sum(accel ** 2))
 
 
 def joint_limits(
@@ -164,3 +182,67 @@ def feet_air_time(
 ) -> float:
     """Reward for stance contact lasting at least *min_duration* seconds."""
     return float(min(contact_duration / min_duration, 1.0))
+
+
+# ---------------------------------------------------------------------------
+# Trajectory-based rewards (v2)
+# ---------------------------------------------------------------------------
+
+def displacement_tracking(
+    actual_disp: NDArray, expected_disp: NDArray, scale: float = 10.0
+) -> float:
+    """Gaussian reward for matching expected XY displacement over a window.
+
+    *actual_disp* and *expected_disp* are 2D vectors (world-frame XY).
+    Penalises both wrong direction and wrong magnitude simultaneously.
+    """
+    diff = actual_disp - expected_disp
+    return float(np.exp(-scale * np.dot(diff, diff)))
+
+
+def heading_tracking(
+    actual_yaw_change: float, expected_yaw_change: float, scale: float = 10.0
+) -> float:
+    """Gaussian reward for matching expected heading change over a window."""
+    err = actual_yaw_change - expected_yaw_change
+    # Wrap to [-pi, pi]
+    err = (err + np.pi) % (2 * np.pi) - np.pi
+    return float(np.exp(-scale * err * err))
+
+
+def pace_tracking(
+    actual_dist: float,
+    expected_dist: float,
+    tolerance: float = 0.15,
+    scale: float = 10.0,
+) -> float:
+    """Reward for covering the expected distance on time.
+
+    Full reward when progress ratio is within *tolerance* of 1.0.
+    Outside the band, drops via Gaussian on the excess error.
+    When expected_dist is near zero (standing), returns 1.0.
+    """
+    if expected_dist < 0.01:
+        return 1.0
+    ratio = actual_dist / expected_dist
+    excess = max(0.0, abs(ratio - 1.0) - tolerance)
+    return float(np.exp(-scale * excess * excess))
+
+
+def posture_composite(
+    gravity_proj: NDArray,
+    pelvis_z: float,
+    target_z: float,
+    upper_body_deviation: float,
+    height_scale: float = 40.0,
+    upper_scale: float = 4.0,
+) -> float:
+    """Combined posture quality: upright * height * upper-body stillness.
+
+    Returns a product of three [0,1] factors so ALL must be satisfied.
+    *upper_body_deviation* is sum-of-squares of waist + arm deviations.
+    """
+    upright_factor = max(0.0, float(-gravity_proj[2]))
+    height_factor = float(np.exp(-height_scale * (pelvis_z - target_z) ** 2))
+    upper_factor = float(np.exp(-upper_scale * upper_body_deviation))
+    return upright_factor * height_factor * upper_factor
