@@ -1,0 +1,44 @@
+# Live tuning file for G1 training
+# Copy to tune.yaml and modify while training is running.
+# Changes are picked up within ~1 second (50 env steps).
+#
+# Usage:
+#   cp tune.yaml.example tune.yaml
+#   # start training in another terminal
+#   python -m rl.train --stage walk_v4 --resume rl/checkpoints/best_model.zip
+#   # edit tune.yaml to adjust parameters on the fly
+
+# --- PPO hyperparameters (conservative for fine-tuning; avoid deterioration) ---
+learning_rate: 3.0e-6
+ent_coef: 0.0
+clip_range: 0.1
+gamma: 0.998
+max_log_std: -2.0
+
+# --- Reward weights ---
+# Task reward should dominate smoothness; if smoothness too strong, policy collapses.
+reward:
+  # Trajectory tracking (primary)
+  displacement_tracking_weight: 9.0
+  heading_tracking_weight: 6.0
+  pace_tracking_weight: 5.0
+  pace_tolerance: 0.2
+
+  # Posture
+  posture_composite_weight: 8.0
+
+  # Gait quality
+  foot_clearance: 2.0
+  feet_air_time: 1.5
+  feet_contact: 2.0
+
+  # Smoothness (moderate; reduce further if still deteriorating)
+  action_smoothness: -1.2
+  action_acceleration: -0.8
+
+  # Efficiency
+  energy: -0.004
+  joint_limits: -5.0
+
+  # Alive
+  alive: 2.0

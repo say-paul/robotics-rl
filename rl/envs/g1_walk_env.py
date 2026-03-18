@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any, Dict, Optional, Tuple
 
 import gymnasium as gym
+import yaml
 import mujoco
 import numpy as np
 from gymnasium import spaces
@@ -117,6 +118,7 @@ class G1WalkEnv(gym.Env):
 
         # Per-episode state
         self._step_count = 0
+        self._episode_reward = 0.0
         self._last_action = np.zeros(ACT_DIM, dtype=np.float32)
         self._prev_prev_action = np.zeros(ACT_DIM, dtype=np.float32)
         self._command = np.zeros(3, dtype=np.float32)
@@ -214,6 +216,7 @@ class G1WalkEnv(gym.Env):
         self._prev_prev_action = np.zeros(ACT_DIM, dtype=np.float32)
         self._phase[:] = [0.0, math.pi]
         self._step_count = 0
+        self._episode_reward = 0.0
         self._left_contact_time = 0.0
         self._right_contact_time = 0.0
 
@@ -226,9 +229,32 @@ class G1WalkEnv(gym.Env):
 
         return self._get_obs(), self._get_info()
 
+    def _reload_tune_file(self) -> None:
+        """Reload reward (and optional env) params from tune_file. Called every ~50 steps."""
+        path = _PROJECT_ROOT / self._env_cfg.tune_file
+        if not path.exists():
+            return
+        try:
+            with open(path) as f:
+                data = yaml.safe_load(f)
+        except Exception:
+            return
+        if not data or not isinstance(data, dict):
+            return
+        reward_data = data.get("reward")
+        if isinstance(reward_data, dict):
+            for key, value in reward_data.items():
+                if hasattr(self._reward_cfg, key):
+                    attr = getattr(self._reward_cfg, key)
+                    if isinstance(attr, np.ndarray):
+                        continue
+                    setattr(self._reward_cfg, key, value)
+
     def step(
         self, action: NDArray
     ) -> Tuple[NDArray, float, bool, bool, Dict[str, Any]]:
+        if self._env_cfg.tune_file and self._step_count > 0 and self._step_count % 50 == 0:
+            self._reload_tune_file()
         action = np.clip(action, -1.0, 1.0).astype(np.float64)
         q_target = self._default_pos + action * ACTION_SCALE
 
@@ -260,6 +286,8 @@ class G1WalkEnv(gym.Env):
         terminated = self._is_fallen()
         truncated = self._step_count >= self._env_cfg.episode_length
 
+        self._episode_reward += float(reward)
+
         # Advance phase oscillator
         self._phase += self._phase_dt
         self._phase = np.fmod(self._phase + math.pi, 2 * math.pi) - math.pi
@@ -269,6 +297,8 @@ class G1WalkEnv(gym.Env):
 
         info = self._get_info()
         info["reward_components"] = reward_info
+        if terminated or truncated:
+            info["episode"] = {"r": self._episode_reward, "l": self._step_count}
 
         return obs, reward, terminated, truncated, info
 
@@ -470,10 +500,17 @@ class G1WalkEnv(gym.Env):
                 ang_vel_z, self._command[2], scale=vscale
             )
 
-        # ---- Posture ----
+        # ---- Posture (use reference_pose if set for mimic / stand comparison) ----
+        ref_pose = self._default_pos
+        if (
+            getattr(cfg, "reference_pose", None) is not None
+            and len(cfg.reference_pose) == NUM_MOTORS
+        ):
+            ref_pose = np.asarray(cfg.reference_pose, dtype=np.float64)
+
         if cfg.posture_composite_weight > 0.0:
-            waist_dev = float(np.sum(joint_pos[12:15] ** 2))
-            arm_diff = joint_pos[15:] - self._default_pos[15:]
+            waist_dev = float(np.sum((joint_pos[12:15] - ref_pose[12:15]) ** 2))
+            arm_diff = joint_pos[15:] - ref_pose[15:]
             arm_dev = float(np.sum(arm_diff ** 2))
             upper_dev = waist_dev + arm_dev
             components["posture_composite"] = (
@@ -486,13 +523,13 @@ class G1WalkEnv(gym.Env):
             components["height"] = cfg.height * rewards.height(pelvis_z, cfg.target_height)
             if cfg.default_pose_tracking != 0.0:
                 components["default_pose_tracking"] = cfg.default_pose_tracking * rewards.default_pose_tracking(
-                    joint_pos, self._default_pos, cfg.pose_mask
+                    joint_pos, ref_pose, cfg.pose_mask
                 )
             if cfg.waist_stability != 0.0:
                 components["waist_stability"] = cfg.waist_stability * rewards.waist_stability(joint_pos)
             if cfg.arm_pose_penalty != 0.0:
                 components["arm_pose_penalty"] = cfg.arm_pose_penalty * rewards.arm_pose_penalty(
-                    joint_pos, self._default_pos
+                    joint_pos, ref_pose
                 )
             if cfg.knee_symmetry != 0.0:
                 components["knee_symmetry"] = cfg.knee_symmetry * rewards.knee_symmetry(joint_pos)

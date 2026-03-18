@@ -38,17 +38,50 @@ def _extract_onnx_weights(onnx_path: str) -> dict[str, np.ndarray]:
     }
 
 
+def _parse_sb3_export_weights(
+    weights: dict[str, np.ndarray],
+) -> tuple[np.ndarray, np.ndarray, list[tuple[np.ndarray, np.ndarray]], int, float | None]:
+    """Parse ONNX exported by rl.export_onnx (actor.mlp_extractor.policy_net.*, action_net).
+
+    Returns (obs_mean, obs_reciprocal_std, layer_list, action_dim, log_std_init).
+    log_std_init is None if the ONNX has mean+log_std; otherwise a float for action head only.
+    """
+    if "actor.mlp_extractor.policy_net.0.weight" not in weights:
+        return None
+    obs_mean = weights.get("obs_mean")
+    sqrt_var = weights.get("sqrt")
+    if obs_mean is None:
+        obs_mean = np.zeros(103, dtype=np.float32)
+    if sqrt_var is not None and sqrt_var.size == 103:
+        obs_recip_std = 1.0 / (np.asarray(sqrt_var, dtype=np.float64) + 1e-8)
+    else:
+        obs_recip_std = np.ones(103, dtype=np.float32)
+
+    layers = []
+    for i in [0, 2, 4]:
+        w = weights.get(f"actor.mlp_extractor.policy_net.{i}.weight")
+        b = weights.get(f"actor.mlp_extractor.policy_net.{i}.bias")
+        if w is None or b is None:
+            break
+        layers.append((w, b))
+    aw = weights.get("actor.action_net.weight")
+    ab = weights.get("actor.action_net.bias")
+    if aw is not None and ab is not None:
+        layers.append((aw, ab))
+    if not layers:
+        return None
+    action_dim = int(layers[-1][1].shape[0])
+    return obs_mean, obs_recip_std, layers, action_dim, -2.0
+
+
 def _parse_joystick_weights(
     weights: dict[str, np.ndarray],
-) -> tuple[np.ndarray, np.ndarray, list[tuple[np.ndarray, np.ndarray]], int]:
+) -> tuple[np.ndarray, np.ndarray, list[tuple[np.ndarray, np.ndarray]], int] | None:
     """Parse the g1_joystick ONNX weight layout.
 
-    Returns (obs_mean, obs_reciprocal_std, layer_list, action_dim) where
-    each entry in layer_list is (weight, bias) with weight shape
-    (in_features, out_features) as stored in the ONNX Gemm nodes.
+    Returns (obs_mean, obs_reciprocal_std, layer_list, action_dim) or None if not matched.
     """
     keys = sorted(weights.keys())
-
     obs_mean = None
     obs_recip_std = None
     layers: list[tuple[np.ndarray, np.ndarray]] = []
@@ -65,20 +98,21 @@ def _parse_joystick_weights(
     hidden_b_keys = sorted(
         [k for k in keys if "/BiasAdd/ReadVariableOp" in k],
     )
+    if not hidden_w_keys or not hidden_b_keys:
+        return None
 
     for wk, bk in zip(hidden_w_keys, hidden_b_keys):
         w = weights[wk]
         b = weights[bk]
         layers.append((w, b))
-
+    if not layers:
+        return None
     last_out = layers[-1][1].shape[0]
-    action_dim = last_out // 2  # output is [mean, log_std]
-
+    action_dim = last_out // 2
     if obs_mean is None:
         obs_mean = np.zeros(103, dtype=np.float32)
     if obs_recip_std is None:
         obs_recip_std = np.ones(103, dtype=np.float32)
-
     return obs_mean, obs_recip_std, layers, action_dim
 
 
@@ -95,8 +129,20 @@ def import_onnx_into_ppo(
     into the ``VecNormalize`` wrapper so SB3's pipeline handles it natively.
     """
     weights = _extract_onnx_weights(onnx_path)
-    obs_mean, obs_recip_std, layers, action_dim = _parse_joystick_weights(weights)
-    obs_var = (1.0 / (obs_recip_std + 1e-8)) ** 2
+    log_std_init = None
+    parsed = _parse_sb3_export_weights(weights)
+    if parsed is not None:
+        obs_mean, obs_recip_std, layers, action_dim, log_std_init = parsed
+        log.info("Detected SB3-exported ONNX format (actor.policy_net + action_net)")
+    else:
+        joystick = _parse_joystick_weights(weights)
+        if joystick is None:
+            raise ValueError(
+                "ONNX format not recognized. Expected either SB3 export "
+                "(actor.mlp_extractor.policy_net.*, action_net) or g1_joystick layout."
+            )
+        obs_mean, obs_recip_std, layers, action_dim = joystick
+    obs_var = (1.0 / (np.asarray(obs_recip_std, dtype=np.float64) + 1e-8)) ** 2
 
     # Determine hidden layer sizes (excluding the final output layer)
     hidden_sizes = [layer[1].shape[0] for layer in layers[:-1]]
@@ -114,20 +160,24 @@ def import_onnx_into_ppo(
         env.obs_rms.count = 1_000_000  # high count so stats don't shift quickly
         log.info("Loaded observation normalisation into VecNormalize")
 
-    # Build PPO with matching architecture
+    # Use log_std_init from config if provided (same as scratch/resume path)
+    ppo_kwargs = dict(ppo_kwargs)
+    policy_kwargs = dict(
+        net_arch=dict(pi=hidden_sizes, vf=hidden_sizes),
+        activation_fn=nn.SiLU,
+        log_std_init=ppo_kwargs.pop("log_std_init", log_std_init if log_std_init is not None else -1.0),
+    )
+    # Build PPO with matching architecture (same policy_kwargs shape as scratch path)
     model = PPO(
         "MlpPolicy",
         env,
-        policy_kwargs=dict(
-            net_arch=hidden_sizes,
-            activation_fn=nn.SiLU,
-        ),
+        policy_kwargs=policy_kwargs,
         device=device,
         **ppo_kwargs,
     )
 
-    # Transplant weights into the SB3 policy
-    _load_actor_weights(model, layers, action_dim)
+    # Transplant weights into the SB3 policy (log_std_init used when ONNX has action mean only)
+    _load_actor_weights(model, layers, action_dim, log_std_init=log_std_init)
 
     log.info("Imported pretrained weights from %s", onnx_path)
     return model
@@ -137,14 +187,19 @@ def _load_actor_weights(
     model: PPO,
     layers: list[tuple[np.ndarray, np.ndarray]],
     action_dim: int,
+    log_std_init: float | None = None,
 ) -> None:
-    """Copy ONNX layer weights into the SB3 policy's actor MLP."""
+    """Copy ONNX layer weights into the SB3 policy's actor MLP.
+
+    If log_std_init is set (e.g. from SB3 export with action mean only), policy
+    log_std is set to that scalar; otherwise the last layer bias is split into
+    mean and log_std (joystick format).
+    """
     policy = model.policy
     dev = next(policy.parameters()).device
     mlp = policy.mlp_extractor.policy_net
 
-    # Hidden layers: the ONNX Gemm stores weight as (in, out), PyTorch Linear
-    # stores (out, in), so we transpose.
+    # Hidden layers: ONNX often has (out, in), PyTorch Linear is (out, in); SB3 export is (out, in)
     linear_idx = 0
     for module in mlp.modules():
         if not isinstance(module, nn.Linear):
@@ -152,21 +207,32 @@ def _load_actor_weights(
         if linear_idx >= len(layers) - 1:
             break
         w, b = layers[linear_idx]
-        module.weight.data = torch.tensor(w.T, dtype=torch.float32, device=dev)
+        # SB3 export: weight shape (out, in); transpose to match if needed
+        if w.shape[0] == b.shape[0]:
+            module.weight.data = torch.tensor(w, dtype=torch.float32, device=dev)
+        else:
+            module.weight.data = torch.tensor(w.T, dtype=torch.float32, device=dev)
         module.bias.data = torch.tensor(b, dtype=torch.float32, device=dev)
         linear_idx += 1
 
-    # Final layer: ONNX outputs [action_mean(29), action_log_std(29)]
     final_w, final_b = layers[-1]
-    mean_w = final_w[:, :action_dim]  # (hidden, 29)
-    mean_b = final_b[:action_dim]
-    log_std_b = final_b[action_dim:]
-
-    policy.action_net.weight.data = torch.tensor(mean_w.T, dtype=torch.float32, device=dev)
-    policy.action_net.bias.data = torch.tensor(mean_b, dtype=torch.float32, device=dev)
-
-    if hasattr(policy, "log_std"):
-        policy.log_std.data = torch.tensor(log_std_b, dtype=torch.float32, device=dev)
+    if log_std_init is not None:
+        mean_w = final_w
+        mean_b = final_b
+        if mean_w.shape[0] != action_dim:
+            mean_w = mean_w.T
+        policy.action_net.weight.data = torch.tensor(mean_w, dtype=torch.float32, device=dev)
+        policy.action_net.bias.data = torch.tensor(mean_b, dtype=torch.float32, device=dev)
+        if hasattr(policy, "log_std"):
+            policy.log_std.data.fill_(log_std_init)
+    else:
+        mean_w = final_w[:, :action_dim]
+        mean_b = final_b[:action_dim]
+        log_std_b = final_b[action_dim:]
+        policy.action_net.weight.data = torch.tensor(mean_w.T, dtype=torch.float32, device=dev)
+        policy.action_net.bias.data = torch.tensor(mean_b, dtype=torch.float32, device=dev)
+        if hasattr(policy, "log_std"):
+            policy.log_std.data = torch.tensor(log_std_b, dtype=torch.float32, device=dev)
 
     log.info(
         "Transplanted %d layers + action head into SB3 policy",

@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import List, Tuple
+from typing import List, Optional, Tuple
 
 import numpy as np
 from numpy.typing import NDArray
 
+from actions.joints import STAND_POSE
 
 NUM_MOTORS = 29
 
@@ -46,6 +47,10 @@ class EnvConfig:
 
     # Command resampling: 0 = fixed per episode, >0 = resample every N steps
     cmd_resample_interval: int = 0
+
+    # Live tuning: path to YAML file (e.g. tune.yaml). If set, env reloads reward
+    # and (optionally) other params every ~50 steps. Empty string = disabled.
+    tune_file: str = ""
 
     # Domain randomization
     domain_rand: bool = False
@@ -112,6 +117,12 @@ class RewardConfig:
 
     # Physical targets
     target_height: float = 0.68      # pelvis z for knees-bent stance
+
+    # Optional reference pose (29 joint angles, rad) for comparison / mimic reward.
+    # If set, default_pose_tracking and upper-body part of posture_composite use
+    # this instead of the control default (e.g. STAND_POSE for straight stand).
+    # Use with default_pose_tracking > 0 and pose_mask to fine-tune mimicking a pose.
+    reference_pose: Optional[NDArray] = None
 
     # Joint mask for default_pose_tracking (set per stage)
     pose_mask: NDArray = field(default_factory=lambda: _MASK_ALL.copy())
@@ -405,6 +416,66 @@ class TrainingConfig:
         return cfg
 
     @classmethod
+    def stage_walk_v5(cls) -> TrainingConfig:
+        """Human-like walking: smooth, fluid gait with full x/y/yaw command following.
+
+        Fine-tune from g1_walk_v5.onnx to reduce jerkiness and improve naturalness.
+        Balance: task reward (trajectory + posture) must dominate smoothness penalties
+        so training does not deteriorate into minimal motion. Live tuning via tune.yaml.
+        """
+        cfg = cls.stage_walk_v3()
+
+        cfg.env.tune_file = "tune.yaml"
+        cfg.env.cmd_vx_range = (-0.3, 0.6)
+        cfg.env.cmd_vy_range = (-0.3, 0.3)
+        cfg.env.cmd_vyaw_range = (-1.0, 1.0)
+        cfg.env.cmd_resample_interval = 200
+
+        r = cfg.reward
+        # Trajectory (x, y, heading) — primary objective; keep scale above smoothness
+        r.displacement_tracking_weight = 9.0
+        r.heading_tracking_weight = 6.0
+        r.pace_tracking_weight = 5.0
+        r.displacement_scale = 10.0
+        r.pace_tolerance = 0.2          # 20% tolerance to avoid over-penalizing during adaptation
+        r.posture_composite_weight = 8.0
+
+        # Smoothness: moderate so policy stays smooth without collapsing to no motion
+        r.action_smoothness = -1.2
+        r.action_acceleration = -0.8
+
+        r.foot_clearance = 2.0
+        r.feet_air_time = 1.0
+        r.feet_contact = 2.0
+        r.energy = -0.004
+        r.joint_limits = -5.0
+        r.alive = 2.0
+
+        # Conservative PPO for fine-tuning (avoid deterioration)
+        cfg.ppo.learning_rate = 3e-6
+        cfg.ppo.n_epochs = 3
+        cfg.ppo.clip_range = 0.1         # smaller updates when fine-tuning
+        cfg.ppo.total_timesteps = 40_000_000
+        cfg.ppo.n_envs = 16
+        cfg.ppo.log_std_init = -2.0
+        cfg.ppo.eval_freq = 500_000
+        cfg.ppo.checkpoint_freq = 500_000
+        return cfg
+
+    @classmethod
+    def stage_stand_mimic(cls) -> TrainingConfig:
+        """Train to mimic the straight stand pose (STAND_POSE = all zeros).
+
+        Use reference_pose so the robot is rewarded for matching that pose.
+        Zero velocity commands; good for fine-tuning a policy to hold stand.
+        """
+        cfg = cls.stage_stand()
+        cfg.reward.reference_pose = np.array(STAND_POSE, dtype=np.float64)
+        cfg.reward.default_pose_tracking = 5.0
+        cfg.reward.pose_mask = _MASK_ALL.copy()
+        return cfg
+
+    @classmethod
     def stage_slow_walk(cls) -> TrainingConfig:
         """Legacy: forward-only walking. Use stage_walk instead."""
         return cls.stage_walk()
@@ -414,7 +485,7 @@ class TrainingConfig:
         """Legacy: omnidirectional walking. Use stage_walk instead."""
         return cls.stage_walk()
 
-    STAGES = ("stand", "stand_phase2", "walk", "walk_v2", "walk_v3", "slow_walk", "full_walk")
+    STAGES = ("stand", "stand_phase2", "stand_mimic", "walk", "walk_v2", "walk_v3", "walk_v5", "slow_walk", "full_walk")
 
     @classmethod
     def from_stage(cls, stage: str | None) -> TrainingConfig:
@@ -424,9 +495,11 @@ class TrainingConfig:
         _factories = {
             "stand": cls.stage_stand,
             "stand_phase2": cls.stage_stand_phase2,
+            "stand_mimic": cls.stage_stand_mimic,
             "walk": cls.stage_walk,
             "walk_v2": cls.stage_walk_v2,
             "walk_v3": cls.stage_walk_v3,
+            "walk_v5": cls.stage_walk_v5,
             "slow_walk": cls.stage_slow_walk,
             "full_walk": cls.stage_full_walk,
         }

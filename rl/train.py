@@ -32,9 +32,12 @@ from __future__ import annotations
 import argparse
 import logging
 import os
+import sys
+from copy import deepcopy
 from pathlib import Path
 
 import torch
+import yaml
 import torch.nn as nn
 import numpy as np
 from stable_baselines3 import PPO
@@ -44,6 +47,7 @@ from stable_baselines3.common.callbacks import (
     CheckpointCallback,
     EvalCallback,
 )
+from stable_baselines3.common.utils import get_schedule_fn
 from stable_baselines3.common.vec_env import SubprocVecEnv, VecNormalize
 
 from rl.configs.training_config import TrainingConfig
@@ -107,6 +111,49 @@ class StdClampCallback(BaseCallback):
             with torch.no_grad():
                 self.model.policy.log_std.clamp_(max=self.max_log_std)
         return True
+
+
+class TuneYAMLCallback(BaseCallback):
+    """Reload PPO hyperparameters from tune.yaml every N steps for live tuning."""
+
+    def __init__(self, tune_path: str = "tune.yaml", check_every: int = 1000, verbose: int = 0):
+        super().__init__(verbose)
+        self._tune_path = Path(tune_path)
+        self._check_every = check_every
+
+    def _on_step(self) -> bool:
+        if self.n_calls % self._check_every != 0 or not self._tune_path.exists():
+            return True
+        try:
+            with open(self._tune_path) as f:
+                data = yaml.safe_load(f)
+        except Exception:
+            return True
+        if not data or not isinstance(data, dict):
+            return True
+        model = self.model
+        if "learning_rate" in data:
+            lr = float(data["learning_rate"])
+            model.learning_rate = lr
+            model.lr_schedule = get_schedule_fn(lr)
+            for pg in model.policy.optimizer.param_groups:
+                pg["lr"] = lr
+            if self.verbose:
+                log.info("TuneYAML: learning_rate = %s", lr)
+        if "ent_coef" in data:
+            model.ent_coef = float(data["ent_coef"])
+        if "clip_range" in data:
+            val = float(data["clip_range"])
+            model.clip_range = get_schedule_fn(val)  # PPO expects callable, not float
+        if "gamma" in data:
+            model.gamma = float(data["gamma"])
+        if "max_log_std" in data:
+            for cb in (self.parent.callbacks if self.parent else []):
+                if isinstance(cb, StdClampCallback):
+                    cb.max_log_std = float(data["max_log_std"])
+                    break
+        return True
+
 
 
 class EpisodeLengthCeilingCallback(BaseCallback):
@@ -315,11 +362,12 @@ def train(
             tensorboard_log=pcfg.log_dir,
             seed=cfg.seed,
             verbose=1,
+            log_std_init=pcfg.log_std_init,
         )
         # Sync VecNormalize stats from train_env -> eval_env so eval uses
-        # the correct observation normalization from the pretrained model.
-        eval_env.obs_rms = train_env.obs_rms
-        eval_env.ret_rms = train_env.ret_rms
+        # the correct observation normalization (EvalCallback will re-sync each eval).
+        eval_env.obs_rms = deepcopy(train_env.obs_rms)
+        eval_env.ret_rms = deepcopy(train_env.ret_rms)
         eval_env.training = False
         eval_env.norm_reward = False
         log.info("Synced VecNormalize stats to eval_env (training=False, norm_reward=False)")
@@ -379,17 +427,27 @@ def train(
         verbose=1,
     )
 
+    callbacks = [
+        eval_callback, checkpoint_callback, vecnorm_best_callback,
+        std_clamp_callback, ceiling_callback,
+    ]
+    if cfg.env.tune_file:
+        tune_path = Path(cfg.env.tune_file)
+        if not tune_path.is_absolute():
+            tune_path = Path(os.getcwd()) / tune_path
+        callbacks.append(TuneYAMLCallback(tune_path=str(tune_path), check_every=1000, verbose=1))
+
     log.info(
         "Starting PPO training for %s timesteps (ep_length=%d) …",
         f"{pcfg.total_timesteps:,}", cfg.env.episode_length,
     )
+    # Disable progress bar when stdout is not a TTY (e.g. nohup) to avoid
+    # tqdm/rich shutdown errors on exit (ImportError: sys.meta_path is None).
+    use_progress_bar = sys.stdout.isatty()
     model.learn(
         total_timesteps=pcfg.total_timesteps,
-        callback=CallbackList(
-            [eval_callback, checkpoint_callback, vecnorm_best_callback,
-             std_clamp_callback, ceiling_callback]
-        ),
-        progress_bar=True,
+        callback=CallbackList(callbacks),
+        progress_bar=use_progress_bar,
     )
 
     final_path = Path(pcfg.checkpoint_dir) / "final_model"
