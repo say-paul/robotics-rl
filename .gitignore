@@ -1,0 +1,61 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg-info/
+*.egg
+dist/
+build/
+*.whl
+
+# Virtual environments
+.venv/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.cursor/
+
+# Model weights and configs (downloaded from HuggingFace / auto-exported)
+# Re-download with: huggingface-cli download <model-id> --local-dir models/<name>
+models/
+
+# Datasets (large, generated or downloaded separately)
+datasets/
+
+# Training outputs
+outputs/
+checkpoints/
+runs/
+wandb/
+*.ckpt
+*.pt
+
+# Mission logs and recordings
+missions/
+
+# MuJoCo runtime artifacts
+MUJOCO_LOG.TXT
+mujoco_log.txt
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Environment / secrets
+.env
+.env.*
+*.pem
+credentials.json
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Misc
+*.log
+*.bak
+*.tmp

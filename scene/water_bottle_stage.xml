@@ -1,0 +1,109 @@
+<mujoco model="water_bottle_stage">
+  <!--
+    Water Bottle Presentation Stage
+    Layout (top-down, X = forward, Y = left):
+      Backstage (x ~ -5)  →  Stairs (-3 to -1)  →  Stage platform (x > -0.5, height 1.0m)
+      Presenter at podium (x=3, y=0)
+      Robot spawns at backstage: x=-5, y=0, z=0.75 (standing height)
+  -->
+
+  <include file="g1_29dof_no_hand.xml"/>
+
+  <statistic center="0 0 1" extent="8.0"/>
+
+  <visual>
+    <headlight diffuse="0.6 0.6 0.6" ambient="0.3 0.3 0.3" specular="0 0 0"/>
+    <rgba haze="0.15 0.25 0.35 1"/>
+    <global azimuth="-130" elevation="-20"/>
+  </visual>
+
+  <asset>
+    <texture type="skybox" builtin="gradient" rgb1="0.3 0.5 0.7" rgb2="0 0 0"
+             width="512" height="3072"/>
+    <texture type="2d" name="groundplane" builtin="checker" mark="edge"
+             rgb1="0.2 0.3 0.4" rgb2="0.1 0.2 0.3" markrgb="0.8 0.8 0.8"
+             width="300" height="300"/>
+    <texture type="2d" name="stage_tex" builtin="flat"
+             rgb1="0.35 0.22 0.12" width="64" height="64"/>
+    <texture type="2d" name="stair_tex" builtin="flat"
+             rgb1="0.45 0.32 0.18" width="64" height="64"/>
+    <texture name="num_1_tex" type="2d" file="textures/num_1.png"/>
+    <texture name="num_2_tex" type="2d" file="textures/num_2.png"/>
+    <texture name="num_3_tex" type="2d" file="textures/num_3.png"/>
+
+    <material name="groundplane" texture="groundplane" texuniform="true"
+              texrepeat="5 5" reflectance="0.2"/>
+    <material name="stage_mat" texture="stage_tex" texuniform="true" reflectance="0.1"/>
+    <material name="stair_mat" texture="stair_tex" texuniform="true" reflectance="0.05"/>
+    <material name="bottle_mat" rgba="0.2 0.5 0.9 0.85"/>
+    <material name="num_1_mat" texture="num_1_tex" emission="1"/>
+    <material name="num_2_mat" texture="num_2_tex" emission="1"/>
+    <material name="num_3_mat" texture="num_3_tex" emission="1"/>
+  </asset>
+
+  <worldbody>
+    <light pos="0 0 5" dir="0 0 -1" directional="true"/>
+    <light pos="2 -3 4" dir="0 0.3 -1" diffuse="0.4 0.4 0.3"/>
+
+    <!-- Ground (backstage level, z=0) -->
+    <geom name="floor" size="12 12 0.05" type="plane" material="groundplane"/>
+
+    <!-- Stage platform: 1.0m high, centered at x=2 -->
+    <body name="stage" pos="2 0 0.5">
+      <geom name="stage_top" type="box" size="3.0 4.0 0.5" material="stage_mat"/>
+    </body>
+
+    <!-- Staircase: 4 steps from x=-1.5 to x=-0.3, each 0.25m high -->
+    <body name="stairs" pos="-1.0 0 0">
+      <geom name="step_1" type="box" pos="-0.6 0 0.125" size="0.2 1.2 0.125" material="stair_mat"/>
+      <geom name="step_2" type="box" pos="-0.2 0 0.375" size="0.2 1.2 0.125" material="stair_mat"/>
+      <geom name="step_3" type="box" pos="0.2 0 0.625" size="0.2 1.2 0.125" material="stair_mat"/>
+      <geom name="step_4" type="box" pos="0.6 0 0.875" size="0.2 1.2 0.125" material="stair_mat"/>
+    </body>
+
+    <!-- Small table with water bottle on stage (far from spawn) -->
+    <body name="water_table" pos="1.5 -2.0 1.0">
+      <geom name="table_top" type="box" size="0.25 0.25 0.02" rgba="0.6 0.4 0.2 1"/>
+      <geom name="table_leg1" type="cylinder" pos="-0.2 -0.2 -0.35" size="0.02 0.35" rgba="0.4 0.4 0.4 1"/>
+      <geom name="table_leg2" type="cylinder" pos="0.2 -0.2 -0.35" size="0.02 0.35" rgba="0.4 0.4 0.4 1"/>
+      <geom name="table_leg3" type="cylinder" pos="-0.2 0.2 -0.35" size="0.02 0.35" rgba="0.4 0.4 0.4 1"/>
+      <geom name="table_leg4" type="cylinder" pos="0.2 0.2 -0.35" size="0.02 0.35" rgba="0.4 0.4 0.4 1"/>
+      <body name="water_bottle" pos="0 0 0.12">
+        <geom name="bottle_body" type="cylinder" size="0.035 0.1" material="bottle_mat"/>
+        <geom name="bottle_cap" type="cylinder" pos="0 0 0.11" size="0.02 0.02" rgba="0.9 0.9 0.9 1"/>
+      </body>
+    </body>
+
+    <!-- Podium for presenter (on stage, far right) -->
+    <body name="podium" pos="3.5 0 1.0">
+      <geom name="podium_body" type="box" size="0.3 0.25 0.5" rgba="0.3 0.15 0.08 1"/>
+      <geom name="podium_top" type="box" pos="0 0 0.52" size="0.35 0.3 0.02" rgba="0.35 0.18 0.1 1"/>
+    </body>
+
+    <!-- Floating colored numbers (positions randomized by simulation.py on reset) -->
+    <body name="marker_1" pos="-3 1 0.914">
+      <geom name="marker_1_geom" type="box" size="0.18 0.005 0.18"
+            material="num_1_mat" contype="0" conaffinity="0"/>
+    </body>
+    <body name="marker_2" pos="-4 -1 0.914">
+      <geom name="marker_2_geom" type="box" size="0.18 0.005 0.18"
+            material="num_2_mat" contype="0" conaffinity="0"/>
+    </body>
+    <body name="marker_3" pos="-2.5 1.5 0.914">
+      <geom name="marker_3_geom" type="box" size="0.18 0.005 0.18"
+            material="num_3_mat" contype="0" conaffinity="0"/>
+    </body>
+
+    <!-- Tracking markers -->
+    <site name="com_marker" pos="0 0 0" size="0.05" rgba="1 0 0 1" type="sphere"/>
+    <site name="left_hand_marker" pos="0 0 0" size="0.025" rgba="0 1 0 1" type="sphere"/>
+    <site name="right_hand_marker" pos="0 0 0" size="0.025" rgba="0 1 0 1" type="sphere"/>
+    <site name="left_foot_marker" pos="0 0 0" size="0.025" rgba="1 0 0 1" type="sphere"/>
+    <site name="right_foot_marker" pos="0 0 0" size="0.025" rgba="1 0 0 1" type="sphere"/>
+
+    <!-- Cameras -->
+    <camera name="global_view" pos="0 -8 5" xyaxes="1 0 0 0 0.5 0.866"/>
+    <camera name="audience_view" pos="7 0 2.5" xyaxes="0 1 0 -0.2 0 1"/>
+    <camera name="stage_overhead" pos="2 0 7" xyaxes="1 0 0 0 1 0"/>
+  </worldbody>
+</mujoco>
