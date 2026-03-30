@@ -249,6 +249,7 @@ _CHAT_HTML = """<!DOCTYPE html>
   .quick-cmds button.danger:hover{background:#3d1419}
   .quick-cmds button.warn{border-color:#d29922;color:#d29922}
   .quick-cmds button.warn:hover{background:#3b2e00}
+  .quick-cmds button.always-on{opacity:1!important;cursor:pointer!important}
   .input-bar{display:flex;gap:6px}
   .input-bar input{flex:1;padding:10px 14px;border:1px solid #30363d;border-radius:8px;background:#0d1117;color:#c9d1d9;font-size:0.95em;outline:none}
   .input-bar input:focus{border-color:#1f6feb}
@@ -281,22 +282,9 @@ _CHAT_HTML = """<!DOCTYPE html>
     <a id="video-link" href="#" target="_blank">Download Video</a>
     <div class="controls">
       <div class="quick-cmds">
-        <button onclick="send('status')">Status</button>
-        <button onclick="send('release')">Release</button>
-        <button onclick="send('walk 3 meters')">Walk 3m</button>
-        <button onclick="send('turn left')">Turn Left</button>
-        <button onclick="send('turn right')">Turn Right</button>
-        <button onclick="send('go 5m north')">5m North</button>
-        <button onclick="send('go 5m east')">5m East</button>
-        <button onclick="send('walk to the podium')">Go to Podium</button>
-        <button onclick="send('look around')">Look Around</button>
-        <button onclick="send('what do you see')">What Do You See?</button>
-        <button onclick="send('describe the scene')">Describe Scene</button>
-        <button onclick="send('where is the podium')">Where is Podium?</button>
-        <button onclick="send('help')">Help</button>
-        <button onclick="send('start mission')">Mission</button>
-        <button onclick="send('stop')" class="warn">Stop Motion</button>
-        <button onclick="send('quit')" class="danger">Quit</button>
+        <button onclick="sendImmediate('release')" class="always-on">Release</button>
+        <button onclick="sendImmediate('halt')" class="always-on warn">Halt</button>
+        <button onclick="sendImmediate('stop')" class="always-on danger">Stop</button>
       </div>
       <div class="input-bar">
         <input id="inp" placeholder="Try: walk 5 meters, go 10m east, look around, stop, help..." autofocus
@@ -320,7 +308,13 @@ function setChatBusy(b){
   chatBusy=b;
   inp.disabled=b;
   if(sendBtn)sendBtn.disabled=b;
-  document.querySelectorAll('.quick-cmds button').forEach(x=>{x.disabled=b});
+  document.querySelectorAll('.quick-cmds button').forEach(x=>{
+    if(!x.classList.contains('always-on'))x.disabled=b;
+  });
+}
+function sendImmediate(text){
+  addMsg('user',text);
+  if(ws&&ws.readyState===1)ws.send(text);
 }
 function connect(){
   const proto=location.protocol==='https:'?'wss':'ws';

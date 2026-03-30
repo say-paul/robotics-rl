@@ -32,26 +32,25 @@ logger = logging.getLogger(__name__)
 AVAILABLE_SCENES = {
     "flat_ground": "flat_ground.xml",
     "water_bottle_stage": "water_bottle_stage.xml",
+    "color_course": "color_course.xml",
+    "stair_training": "stair_training.xml",
 }
 
 # Default robot spawn for each scene (x, y, z)
 SPAWN_POSITIONS = {
     "flat_ground": (0.0, 0.0, 0.75),
     "water_bottle_stage": (-5.0, 0.0, 0.75),
+    "color_course": (0.0, 0.0, 0.75),
+    "stair_training": (-2.0, 0.0, 0.75),
 }
 
-MARKER_NAMES = ["marker_1", "marker_2", "marker_3"]
-MARKER_COLORS = {
-    "marker_1": "red 1",
-    "marker_2": "blue 2",
-    "marker_3": "green 3",
-}
-_MARKER_Z = 0.914  # 3 feet above ground
+_MARKER_Z = 0.914
 
 # XY bounds for marker randomization per scene
 _MARKER_BOUNDS = {
     "flat_ground":          {"x": (1.0, 5.0),  "y": (-3.0, 3.0)},
     "water_bottle_stage":   {"x": (-4.5, -2.0), "y": (-2.0, 2.0)},
+    "color_course":         {"x": (2.0, 25.0),  "y": (-7.0, 7.0)},
 }
 
 
@@ -257,6 +256,15 @@ class G1Simulation:
         self._step_count = 0
 
     # ── Marker randomization ─────────────────────────────────────────────
+    def _discover_markers(self) -> list:
+        """Auto-discover all bodies whose name starts with 'marker_'."""
+        names = []
+        for i in range(self.model.nbody):
+            name = self.model.body(i).name
+            if name.startswith("marker_"):
+                names.append(name)
+        return names
+
     def _randomize_markers(self) -> None:
         """Place visual navigation markers at random floor positions."""
         bounds = _MARKER_BOUNDS.get(self.scene_name)
@@ -264,7 +272,8 @@ class G1Simulation:
             return
         xlo, xhi = bounds["x"]
         ylo, yhi = bounds["y"]
-        for name in MARKER_NAMES:
+        marker_names = self._discover_markers()
+        for name in marker_names:
             body_id = mujoco.mj_name2id(
                 self.model, mujoco.mjtObj.mjOBJ_BODY, name,
             )
@@ -272,8 +281,9 @@ class G1Simulation:
                 continue
             x = float(np.random.uniform(xlo, xhi))
             y = float(np.random.uniform(ylo, yhi))
-            self.model.body_pos[body_id] = [x, y, _MARKER_Z]
-            self._marker_positions[name] = np.array([x, y, _MARKER_Z])
+            z = float(self.model.body_pos[body_id][2])
+            self.model.body_pos[body_id] = [x, y, z]
+            self._marker_positions[name] = np.array([x, y, z])
         mujoco.mj_forward(self.model, self.data)
         logger.info(
             "Markers randomized: %s",
@@ -461,10 +471,10 @@ class G1Simulation:
                     self._cached_frames[cam] = r.render().copy()
                 except Exception:
                     pass
-            # Tracking camera for the global view (5 o'clock, 20° elev, 3m)
+            # 3rd-person chase camera (behind and above the robot)
             try:
                 self._cached_frames["global_view"] = self.render_tracking(
-                    azimuth=150, elevation=-20, distance=3.0,
+                    azimuth=180, elevation=-15, distance=4.0,
                 )
             except Exception:
                 pass

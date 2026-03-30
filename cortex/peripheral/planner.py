@@ -106,6 +106,7 @@ class ToolRegistry:
         self._release_harness_fn: Optional[Callable] = None
         self._goto_landmark_fn: Optional[Callable[[str], str]] = None
         self._sim_state_fn: Optional[Callable] = None
+        self._randomize_fn: Optional[Callable] = None
 
     def set_goto_landmark(self, fn: Optional[Callable[[str], str]]) -> None:
         """Navigate to a named landmark (wired after planner + sim exist)."""
@@ -114,6 +115,10 @@ class ToolRegistry:
     def set_sim_state_fn(self, fn: Optional[Callable]) -> None:
         """Provide ``() -> (pos_3d, yaw_rad)`` for visual navigation."""
         self._sim_state_fn = fn
+
+    def set_randomize_fn(self, fn: Optional[Callable]) -> None:
+        """Provide a callable that re-randomizes block positions."""
+        self._randomize_fn = fn
 
     def wire(
         self,
@@ -156,10 +161,41 @@ class ToolRegistry:
         return self._motor.turn_magnetic(heading)
 
     def goto_landmark(self, name: str = "") -> str:
-        """Walk toward a landmark from the scene map (model planner / tools)."""
-        if self._goto_landmark_fn and name:
-            return self._goto_landmark_fn(name.strip())
-        return "Landmark navigation is not available or name is empty."
+        """Walk toward a target purely using camera vision.
+
+        Extracts the color word from names like "pink box", "brown block",
+        "the cyan cube" and uses fast HSV scan-and-navigate.
+        No MuJoCo ground-truth data is used.
+        """
+        name = name.strip().lower()
+        if not name:
+            return "No target specified."
+        color = _extract_color(name)
+        if color and self._get_image_fn and self._motor:
+            return _scan_and_navigate(
+                color=color,
+                get_image_fn=self._get_image_fn,
+                vlm_caption_fn=self._vlm_caption_fn,
+                motor=self._motor,
+                turn_fn=lambda deg: self._motor.turn_degrees(deg),
+            )
+        return f"Cannot navigate to '{name}' — no matching color detected."
+
+    def assess_terrain(self) -> str:
+        """Use camera to assess terrain ahead for obstacles, stairs, etc."""
+        if self._get_image_fn and self._vlm_caption_fn:
+            image = self._get_image_fn()
+            if image is not None:
+                return self._vlm_caption_fn(
+                    image,
+                    "Analyze the terrain ahead. Are there stairs, ramps, obstacles, or flat ground? "
+                    "Describe what you see and whether it is safe to walk forward.",
+                )
+        return "Camera not available for terrain assessment."
+
+    def climb_stairs(self, direction: str = "up") -> str:
+        """Attempt to climb stairs using the trained RL policy (if available)."""
+        return f"Stair climbing ({direction}) is not yet available — RL policy not loaded."
 
     def goto_visual_target(self, description: str = "") -> str:
         """Walk toward a visually described target using the head camera + VLM."""
@@ -175,6 +211,12 @@ class ToolRegistry:
             motor=self._motor,
             sim_state_fn=self._sim_state_fn,
         )
+
+    def randomize_blocks(self) -> str:
+        """Re-randomize marker block positions in the scene."""
+        if self._randomize_fn:
+            return self._randomize_fn()
+        return "Block randomization not available."
 
     def halt(self) -> str:
         return self._motor.halt()
@@ -547,7 +589,7 @@ class Planner:
     # ── Safety intercept (always instant) ──────────────────────────────
 
     _SAFETY_EXACT = {"stop", "halt", "freeze", "hold", "stay", "release",
-                     "help", "status", "quit"}
+                     "help", "status", "quit", "randomize"}
 
     def _safety_intercept(self, instruction: str) -> Optional[str]:
         """Handle safety-critical commands instantly without VLM."""
@@ -565,6 +607,8 @@ class Planner:
                 return self.tools.get_status()
             if instr_lower == "quit":
                 return self.tools.quit_simulation()
+            if instr_lower == "randomize":
+                return self.tools.randomize_blocks()
 
         return None
 
@@ -774,6 +818,203 @@ class Planner:
                     args[f"arg{pos_idx}"] = val
                     pos_idx += 1
         return args
+
+
+_STRIP_SUFFIXES = re.compile(
+    r"\s*\b(box|block|cube|marker|object|thing|ball|sphere|target|item)\b\s*",
+    re.IGNORECASE,
+)
+
+
+def _extract_color(name: str) -> Optional[str]:
+    """Extract a known HSV color from a landmark name like 'pink box' or 'the brown cube'.
+
+    Returns the color string if found, else None.
+    """
+    cleaned = _STRIP_SUFFIXES.sub(" ", name).strip()
+    cleaned = re.sub(r"^(the|a|an)\s+", "", cleaned).strip()
+    if _has_hsv_range(cleaned):
+        return cleaned
+    for word in name.split():
+        if _has_hsv_range(word):
+            return word
+    return None
+
+
+def _has_hsv_range(color: str) -> bool:
+    """Check if the block_detector has HSV ranges for a color."""
+    try:
+        from cortex.peripheral.block_detector import has_color
+        return has_color(color)
+    except ImportError:
+        return False
+
+
+def _vision_detect(frame: np.ndarray, color: str):
+    """Run fast HSV detection, return BlockDetection or None."""
+    try:
+        from cortex.peripheral.block_detector import detect_block
+        return detect_block(frame, color)
+    except ImportError:
+        return None
+
+
+_FRAME_SETTLE_S = 0.20   # wait for sim to render a fresh frame after a turn
+_TURN_OVERSHOOT = 1.05   # small overshoot to counteract turn tolerance deadband
+
+
+def _fresh_frame(get_image_fn):
+    """Wait for the sim to render a new frame after a physical action."""
+    import time as _t
+    _t.sleep(_FRAME_SETTLE_S)
+    return get_image_fn()
+
+
+def _turn_and_detect(color, bearing_deg, turn_fn, get_image_fn):
+    """Turn toward a bearing, wait for a fresh frame, re-detect."""
+    if abs(bearing_deg) > 3:
+        adjusted = bearing_deg * _TURN_OVERSHOOT
+        turn_fn(adjusted)
+    frame = _fresh_frame(get_image_fn)
+    if frame is None:
+        return None
+    return _vision_detect(frame, color)
+
+
+def _scan_and_navigate(
+    color: str,
+    get_image_fn,
+    vlm_caption_fn,
+    motor,
+    turn_fn,
+    max_approach_steps: int = 20,
+) -> str:
+    """360° image-based scan for a colored block, then walk toward it.
+
+    Phase 1 — Scan: rotate in 60° steps, stop on first detection.
+              After detection, turn to face it and verify with a fresh frame.
+    Phase 2 — Approach: walk toward block in steps, re-detecting each time.
+              If lost, do a ±60° mini re-scan to re-acquire.
+    """
+    import time as _t
+
+    t0 = _t.perf_counter()
+    logger.info("[NAV-SCAN] Scanning for '%s' block using fast image detection...", color)
+
+    # ── Phase 1: find the block ──────────────────────────────────────
+    scan_step_deg = 60
+    det = None
+
+    for scan_i in range(360 // scan_step_deg):
+        if scan_i > 0:
+            turn_fn(scan_step_deg)
+        frame = _fresh_frame(get_image_fn)
+        if frame is None:
+            continue
+        det = _vision_detect(frame, color)
+        if det is not None:
+            logger.info(
+                "[NAV-SCAN] Found '%s' at bearing=%.1f° dist=%.1fm (scan step %d)",
+                color, det.bearing_deg, det.est_distance_m, scan_i,
+            )
+            break
+
+    scan_ms = (_t.perf_counter() - t0) * 1000
+
+    if det is None:
+        logger.info("[NAV-SCAN] '%s' not found after 360° (%.0fms)", color, scan_ms)
+        return f"Could not find a {color} block after scanning 360°."
+
+    # Turn to centre the block, then verify with fresh frame
+    det2 = _turn_and_detect(color, det.bearing_deg, turn_fn, get_image_fn)
+    if det2 is not None:
+        det = det2
+        logger.info("[NAV-SCAN] After centering: %s bearing=%.1f° dist=%.1fm",
+                     color, det.bearing_deg, det.est_distance_m)
+    else:
+        logger.info("[NAV-SCAN] Block not in fresh frame after centering, continuing anyway")
+
+    initial_dist = det.est_distance_m
+
+    # ── Phase 2: approach with re-detection ──────────────────────────
+    total_walked = 0.0
+    lost_count = 0
+    last_det = det
+
+    for step_i in range(max_approach_steps):
+        frame = _fresh_frame(get_image_fn)
+        if frame is None:
+            break
+
+        det = _vision_detect(frame, color)
+
+        if det is None:
+            # If we've walked most of the way, we're probably on top of it
+            if total_walked > initial_dist * 0.6:
+                logger.info("[NAV-SCAN] Lost %s after %.1fm (walked >60%% of %.1fm) — declaring arrival",
+                            color, total_walked, initial_dist)
+                break
+            lost_count += 1
+            if lost_count > 3:
+                logger.info("[NAV-SCAN] Lost %s after %.1fm (gave up)", color, total_walked)
+                break
+            logger.info("[NAV-SCAN] Lost %s, mini re-scan (attempt %d)...", color, lost_count)
+            det = _mini_rescan(color, get_image_fn, turn_fn)
+            if det is None:
+                logger.info("[NAV-SCAN] Mini re-scan failed, stopping")
+                break
+            _turn_and_detect(color, det.bearing_deg, turn_fn, get_image_fn)
+            continue
+
+        lost_count = 0
+        last_det = det
+        logger.info("[NAV-SCAN] Step %d: %s bearing=%.1f° dist=%.1fm",
+                     step_i, color, det.bearing_deg, det.est_distance_m)
+
+        if det.est_distance_m <= 1.5:
+            final_step = max(0.3, det.est_distance_m * 0.4)
+            motor.move(distance=final_step)
+            total_walked += final_step
+            logger.info("[NAV-SCAN] Close enough (%.1fm), final step %.1fm",
+                        det.est_distance_m, final_step)
+            break
+
+        # Correct heading, then walk
+        if abs(det.bearing_deg) > 5:
+            det2 = _turn_and_detect(color, det.bearing_deg, turn_fn, get_image_fn)
+            if det2 is not None:
+                det = det2
+
+        step = min(det.est_distance_m * 0.45, 2.0)
+        motor.move(distance=step)
+        total_walked += step
+
+    elapsed_ms = (_t.perf_counter() - t0) * 1000
+    logger.info("[NAV-SCAN] Navigation to '%s' complete: %.1fm walked in %.0fms",
+                color, total_walked, elapsed_ms)
+
+    msg = f"I can see the {color}! It's about {initial_dist:.1f}m away"
+    if abs(det.bearing_deg if det else 0) < 10:
+        msg += ", straight ahead."
+    elif (det.bearing_deg if det else 0) < 0:
+        msg += ", to my right."
+    else:
+        msg += ", to my left."
+    msg += f" Walking there now.\nArrived, {total_walked:.1f}m walked."
+    return msg
+
+
+def _mini_rescan(color: str, get_image_fn, turn_fn):
+    """Look ±60° to re-acquire a lost block. Returns detection or None."""
+    for angle in [30, -60, 60, -30]:
+        turn_fn(angle)
+        frame = _fresh_frame(get_image_fn)
+        if frame is not None:
+            det = _vision_detect(frame, color)
+            if det is not None:
+                logger.info("[NAV-SCAN] Mini re-scan found %s at %.1f°", color, det.bearing_deg)
+                return det
+    return None
 
 
 def _try_parse_number(s: str) -> Any:

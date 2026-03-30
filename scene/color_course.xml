@@ -1,0 +1,150 @@
+<mujoco model="color_course">
+  <!--
+    Color Course Navigation Arena
+    =============================
+    Large arena with 10 uniquely colored blocks for multi-waypoint navigation.
+    Low semi-transparent guardrail walls define the course boundary.
+    Robot spawns at origin facing +X.
+
+    Blocks (marker_1 through marker_10):
+      1: orange    2: purple    3: yellow    4: pink      5: teal
+      6: cyan      7: brown     8: magenta   9: white    10: coral
+  -->
+
+  <include file="g1_29dof_no_hand.xml"/>
+
+  <statistic center="12 0 1" extent="15.0"/>
+
+  <visual>
+    <headlight diffuse="0.6 0.6 0.6" ambient="0.3 0.3 0.3" specular="0 0 0"/>
+    <rgba haze="0.15 0.25 0.35 1"/>
+    <global azimuth="-130" elevation="-20"/>
+  </visual>
+
+  <asset>
+    <texture type="skybox" builtin="gradient" rgb1="0.3 0.5 0.7" rgb2="0 0 0"
+             width="512" height="3072"/>
+    <texture type="2d" name="groundplane" builtin="checker" mark="edge"
+             rgb1="0.2 0.3 0.4" rgb2="0.1 0.2 0.3" markrgb="0.8 0.8 0.8"
+             width="300" height="300"/>
+
+    <texture name="num_1_tex"  type="2d" file="textures/num_1.png"/>
+    <texture name="num_2_tex"  type="2d" file="textures/num_2.png"/>
+    <texture name="num_3_tex"  type="2d" file="textures/num_3.png"/>
+    <texture name="num_4_tex"  type="2d" file="textures/num_4.png"/>
+    <texture name="num_5_tex"  type="2d" file="textures/num_5.png"/>
+    <texture name="num_6_tex"  type="2d" file="textures/num_6.png"/>
+    <texture name="num_7_tex"  type="2d" file="textures/num_7.png"/>
+    <texture name="num_8_tex"  type="2d" file="textures/num_8.png"/>
+    <texture name="num_9_tex"  type="2d" file="textures/num_9.png"/>
+    <texture name="num_10_tex" type="2d" file="textures/num_10.png"/>
+
+    <material name="groundplane" texture="groundplane" texuniform="true"
+              texrepeat="5 5" reflectance="0.2"/>
+    <material name="num_1_mat"  texture="num_1_tex"  emission="1"/>
+    <material name="num_2_mat"  texture="num_2_tex"  emission="1"/>
+    <material name="num_3_mat"  texture="num_3_tex"  emission="1"/>
+    <material name="num_4_mat"  texture="num_4_tex"  emission="1"/>
+    <material name="num_5_mat"  texture="num_5_tex"  emission="1"/>
+    <material name="num_6_mat"  texture="num_6_tex"  emission="1"/>
+    <material name="num_7_mat"  texture="num_7_tex"  emission="1"/>
+    <material name="num_8_mat"  texture="num_8_tex"  emission="1"/>
+    <material name="num_9_mat"  texture="num_9_tex"  emission="1"/>
+    <material name="num_10_mat" texture="num_10_tex" emission="1"/>
+    <material name="wall_mat"   rgba="0.4 0.4 0.4 0.25"/>
+  </asset>
+
+  <worldbody>
+    <light pos="12 0 8" dir="0 0 -1" directional="true"/>
+    <light pos="5 -5 6" dir="0.3 0.3 -1" diffuse="0.4 0.4 0.3"/>
+
+    <geom name="floor" size="30 15 0.05" type="plane" material="groundplane"/>
+
+    <!-- Guardrail walls (semi-transparent, no collision) -->
+    <geom name="wall_north" type="box" pos="12  8.0 0.3" size="14 0.05 0.3" material="wall_mat" contype="0" conaffinity="0"/>
+    <geom name="wall_south" type="box" pos="12 -8.0 0.3" size="14 0.05 0.3" material="wall_mat" contype="0" conaffinity="0"/>
+    <geom name="wall_east"  type="box" pos="26  0.0 0.3" size="0.05 8.0 0.3" material="wall_mat" contype="0" conaffinity="0"/>
+    <geom name="wall_west"  type="box" pos="-2  0.0 0.3" size="0.05 8.0 0.3" material="wall_mat" contype="0" conaffinity="0"/>
+
+    <!-- 10 colored blocks (positions randomized by simulation.py) -->
+    <!-- 1: orange -->
+    <body name="marker_1" pos="4 3 0.4">
+      <geom name="marker_1_geom" type="box" size="0.4 0.4 0.4"
+            rgba="1.0 0.55 0.0 1" contype="0" conaffinity="0"/>
+      <geom name="marker_1_label" type="box" pos="0 0.401 0" size="0.25 0.005 0.25"
+            material="num_1_mat" contype="0" conaffinity="0"/>
+    </body>
+    <!-- 2: purple -->
+    <body name="marker_2" pos="8 -2 0.4">
+      <geom name="marker_2_geom" type="box" size="0.4 0.4 0.4"
+            rgba="0.55 0.0 0.8 1" contype="0" conaffinity="0"/>
+      <geom name="marker_2_label" type="box" pos="0 0.401 0" size="0.25 0.005 0.25"
+            material="num_2_mat" contype="0" conaffinity="0"/>
+    </body>
+    <!-- 3: yellow -->
+    <body name="marker_3" pos="12 5 0.4">
+      <geom name="marker_3_geom" type="box" size="0.4 0.4 0.4"
+            rgba="1.0 0.95 0.0 1" contype="0" conaffinity="0"/>
+      <geom name="marker_3_label" type="box" pos="0 0.401 0" size="0.25 0.005 0.25"
+            material="num_3_mat" contype="0" conaffinity="0"/>
+    </body>
+    <!-- 4: pink -->
+    <body name="marker_4" pos="16 1 0.4">
+      <geom name="marker_4_geom" type="box" size="0.4 0.4 0.4"
+            rgba="1.0 0.4 0.7 1" contype="0" conaffinity="0"/>
+      <geom name="marker_4_label" type="box" pos="0 0.401 0" size="0.25 0.005 0.25"
+            material="num_4_mat" contype="0" conaffinity="0"/>
+    </body>
+    <!-- 5: teal -->
+    <body name="marker_5" pos="6 -5 0.4">
+      <geom name="marker_5_geom" type="box" size="0.4 0.4 0.4"
+            rgba="0.0 0.5 0.5 1" contype="0" conaffinity="0"/>
+      <geom name="marker_5_label" type="box" pos="0 0.401 0" size="0.25 0.005 0.25"
+            material="num_5_mat" contype="0" conaffinity="0"/>
+    </body>
+    <!-- 6: cyan -->
+    <body name="marker_6" pos="20 -4 0.4">
+      <geom name="marker_6_geom" type="box" size="0.4 0.4 0.4"
+            rgba="0.0 0.85 0.85 1" contype="0" conaffinity="0"/>
+      <geom name="marker_6_label" type="box" pos="0 0.401 0" size="0.25 0.005 0.25"
+            material="num_6_mat" contype="0" conaffinity="0"/>
+    </body>
+    <!-- 7: brown -->
+    <body name="marker_7" pos="14 -6 0.4">
+      <geom name="marker_7_geom" type="box" size="0.4 0.4 0.4"
+            rgba="0.55 0.27 0.07 1" contype="0" conaffinity="0"/>
+      <geom name="marker_7_label" type="box" pos="0 0.401 0" size="0.25 0.005 0.25"
+            material="num_7_mat" contype="0" conaffinity="0"/>
+    </body>
+    <!-- 8: magenta -->
+    <body name="marker_8" pos="22 3 0.4">
+      <geom name="marker_8_geom" type="box" size="0.4 0.4 0.4"
+            rgba="0.85 0.0 0.6 1" contype="0" conaffinity="0"/>
+      <geom name="marker_8_label" type="box" pos="0 0.401 0" size="0.25 0.005 0.25"
+            material="num_8_mat" contype="0" conaffinity="0"/>
+    </body>
+    <!-- 9: white -->
+    <body name="marker_9" pos="10 -1 0.4">
+      <geom name="marker_9_geom" type="box" size="0.4 0.4 0.4"
+            rgba="0.95 0.95 0.95 1" contype="0" conaffinity="0"/>
+      <geom name="marker_9_label" type="box" pos="0 0.401 0" size="0.25 0.005 0.25"
+            material="num_9_mat" contype="0" conaffinity="0"/>
+    </body>
+    <!-- 10: coral -->
+    <body name="marker_10" pos="18 6 0.4">
+      <geom name="marker_10_geom" type="box" size="0.4 0.4 0.4"
+            rgba="1.0 0.4 0.3 1" contype="0" conaffinity="0"/>
+      <geom name="marker_10_label" type="box" pos="0 0.401 0" size="0.25 0.005 0.25"
+            material="num_10_mat" contype="0" conaffinity="0"/>
+    </body>
+
+    <!-- Tracking markers -->
+    <site name="com_marker" pos="0 0 0" size="0.05" rgba="1 0 0 1" type="sphere"/>
+    <site name="left_hand_marker" pos="0 0 0" size="0.025" rgba="0 1 0 1" type="sphere"/>
+    <site name="right_hand_marker" pos="0 0 0" size="0.025" rgba="0 1 0 1" type="sphere"/>
+    <site name="left_foot_marker" pos="0 0 0" size="0.025" rgba="1 0 0 1" type="sphere"/>
+    <site name="right_foot_marker" pos="0 0 0" size="0.025" rgba="1 0 0 1" type="sphere"/>
+
+    <camera name="global_view" pos="12 -18 12" xyaxes="1 0 0 0 0.5 0.866"/>
+  </worldbody>
+</mujoco>

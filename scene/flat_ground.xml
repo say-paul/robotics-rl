@@ -1,6 +1,7 @@
 <mujoco model="flat_ground">
   <!--
     Simple flat-ground scene for free-form interaction and chatbot control.
+    3 colored blocks: red, yellow, green on a brownish floor.
   -->
 
   <include file="g1_29dof_no_hand.xml"/>
@@ -17,7 +18,7 @@
     <texture type="skybox" builtin="gradient" rgb1="0.3 0.5 0.7" rgb2="0 0 0"
              width="512" height="3072"/>
     <texture type="2d" name="groundplane" builtin="checker" mark="edge"
-             rgb1="0.2 0.3 0.4" rgb2="0.1 0.2 0.3" markrgb="0.8 0.8 0.8"
+             rgb1="0.35 0.25 0.15" rgb2="0.25 0.18 0.10" markrgb="0.45 0.35 0.25"
              width="300" height="300"/>
     <texture name="num_1_tex" type="2d" file="textures/num_1.png"/>
     <texture name="num_2_tex" type="2d" file="textures/num_2.png"/>
@@ -33,17 +34,26 @@
     <light pos="0 0 3" dir="0 0 -1" directional="true"/>
     <geom name="floor" size="0 0 0.05" type="plane" material="groundplane"/>
 
-    <!-- Floating colored numbers (positions randomized by simulation.py on reset) -->
-    <body name="marker_1" pos="2 1 0.914">
-      <geom name="marker_1_geom" type="box" size="0.18 0.005 0.18"
+    <!-- Colored blocks (positions randomized by simulation.py on reset) -->
+    <!-- 1: red -->
+    <body name="marker_1" pos="2 1 0.4">
+      <geom name="marker_1_geom" type="box" size="0.4 0.4 0.4"
+            rgba="1.0 0.0 0.0 1" contype="0" conaffinity="0"/>
+      <geom name="marker_1_label" type="box" pos="0 0.401 0" size="0.25 0.005 0.25"
             material="num_1_mat" contype="0" conaffinity="0"/>
     </body>
-    <body name="marker_2" pos="3 -1 0.914">
-      <geom name="marker_2_geom" type="box" size="0.18 0.005 0.18"
+    <!-- 2: yellow -->
+    <body name="marker_2" pos="3 -1 0.4">
+      <geom name="marker_2_geom" type="box" size="0.4 0.4 0.4"
+            rgba="1.0 0.95 0.0 1" contype="0" conaffinity="0"/>
+      <geom name="marker_2_label" type="box" pos="0 0.401 0" size="0.25 0.005 0.25"
             material="num_2_mat" contype="0" conaffinity="0"/>
     </body>
-    <body name="marker_3" pos="1 2 0.914">
-      <geom name="marker_3_geom" type="box" size="0.18 0.005 0.18"
+    <!-- 3: green -->
+    <body name="marker_3" pos="1 2 0.4">
+      <geom name="marker_3_geom" type="box" size="0.4 0.4 0.4"
+            rgba="0.0 0.8 0.0 1" contype="0" conaffinity="0"/>
+      <geom name="marker_3_label" type="box" pos="0 0.401 0" size="0.25 0.005 0.25"
             material="num_3_mat" contype="0" conaffinity="0"/>
     </body>
 

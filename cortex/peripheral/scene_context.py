@@ -19,6 +19,67 @@ logger = logging.getLogger(__name__)
 
 _SCENE_DIR = Path(__file__).resolve().parents[2] / "scene"
 
+def _rgba_to_color_name(rgba_str: str) -> str:
+    """Convert an RGBA string from XML to a human-readable color name."""
+    import colorsys
+    parts = rgba_str.split()
+    if len(parts) < 3:
+        return "unknown"
+    r, g, b = float(parts[0]), float(parts[1]), float(parts[2])
+    h, s, v = colorsys.rgb_to_hsv(r, g, b)
+    h360 = h * 360
+
+    if s < 0.1 and v > 0.8:
+        return "white"
+    if s < 0.15 and v < 0.3:
+        return "black"
+    if s < 0.2 and v < 0.6:
+        return "gray"
+
+    if v < 0.25:
+        return "dark"
+
+    if h360 < 15 or h360 >= 345:
+        if s > 0.6 and g < 0.5:
+            return "red"
+        if g > 0.3:
+            return "coral"
+        return "red"
+    if h360 < 30:
+        return "orange"
+    if h360 < 50:
+        return "yellow"
+    if h360 < 80:
+        return "lime"
+    if h360 < 160:
+        return "green"
+    if h360 < 185:
+        return "teal" if s > 0.5 and v < 0.6 else "cyan"
+    if h360 < 250:
+        return "blue"
+    if h360 < 290:
+        return "purple"
+    if h360 < 330:
+        return "magenta" if s > 0.6 else "pink"
+    return "red"
+
+
+def _auto_marker_name(body_name: str, xml_path) -> str:
+    """Build a friendly name from the marker's geom rgba color."""
+    import xml.etree.ElementTree as ET
+    tree = ET.parse(xml_path)
+    root = tree.getroot()
+    for body in root.iter("body"):
+        if body.get("name") == body_name:
+            for geom in body.findall("geom"):
+                rgba = geom.get("rgba")
+                if rgba:
+                    color = _rgba_to_color_name(rgba)
+                    num = body_name.replace("marker_", "")
+                    return f"{color} block #{num}"
+    return body_name.replace("_", " ")
+
+
 _FRIENDLY_NAMES = {
     "stage": "the stage platform",
     "stairs": "the staircase",
@@ -26,9 +87,6 @@ _FRIENDLY_NAMES = {
     "water_bottle": "a water bottle (on the table)",
     "podium": "the podium",
     "floor": "the ground floor",
-    "marker_1": "floating red number 1",
-    "marker_2": "floating blue number 2",
-    "marker_3": "floating green number 3",
 }
 
 _DIRECTION_LABELS = [
@@ -106,15 +164,20 @@ def build_environment_context(scene_name: str) -> str:
     if not landmarks:
         return "You are in an unknown environment."
 
+    xml_path = _SCENE_DIR / f"{scene_name}.xml"
     parts = [f"You are a humanoid robot (Unitree G1) in a '{scene_name}' environment."]
+    parts.append("The scene may contain colored blocks of any color (not limited to RGB).")
 
     for name, (x, y, z) in sorted(landmarks.items()):
-        friendly = _FRIENDLY_NAMES.get(name, name.replace("_", " "))
+        if name.startswith("marker_") and xml_path.exists():
+            friendly = _auto_marker_name(name, xml_path)
+        else:
+            friendly = _FRIENDLY_NAMES.get(name, name.replace("_", " "))
         parts.append(f"- {friendly} is at position ({x:.1f}, {y:.1f}, z={z:.1f})")
 
     parts.append(
         "\nCoordinates: +X is forward (east), +Y is left (north). "
-        "The robot spawns at approximately (-5, 0) facing east (+X direction)."
+        "The robot spawns at the origin facing east (+X direction)."
     )
     return "\n".join(parts)
 

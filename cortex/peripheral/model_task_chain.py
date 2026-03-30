@@ -34,11 +34,15 @@ MOTOR_TOOL_SCHEMA: Dict[str, frozenset] = {
     "describe_scene": frozenset(),
     "look": frozenset({"prompt"}),
     "look_around": frozenset(),
+    "assess_terrain": frozenset(),
+    "climb_stairs": frozenset({"direction"}),
 }
 
-_PLANNER_SYSTEM = """Robot planner. Output ONLY JSON. Tools: move, turn_degrees, turn_magnetic, halt, goto_landmark, get_position, get_sensor_info, look, look_around, describe_scene.
+_PLANNER_SYSTEM = """Robot planner. Output ONLY JSON. Tools: move, turn_degrees, turn_magnetic, halt, goto_landmark, get_position, get_sensor_info, look, look_around, describe_scene, assess_terrain, climb_stairs.
 Landmarks: {landmarks}
 Robot at ({px:.1f},{py:.1f}) heading {heading_deg:.0f}°.
+
+IMPORTANT: goto_landmark already includes a fast 360° visual scan to find the target. Do NOT add a separate look_around or visual scan step before goto_landmark for colored blocks.
 
 Examples:
 User: turn 10 degrees
@@ -65,8 +69,8 @@ User: where am I
 User: sensor info
 {{"tasks":[{{"category":"motor","tool":"get_sensor_info","args":{{}}}}]}}
 
-User: go to stairs
-{{"tasks":[{{"category":"motor","tool":"goto_landmark","args":{{"name":"stairs"}}}}]}}
+User: go to the orange block
+{{"tasks":[{{"category":"motor","tool":"goto_landmark","args":{{"name":"orange"}}}}]}}
 
 User: face east
 {{"tasks":[{{"category":"motor","tool":"turn_magnetic","args":{{"heading":"east"}}}}]}}
@@ -77,11 +81,26 @@ User: stop
 User: walk backward 2m
 {{"tasks":[{{"category":"motor","tool":"move","args":{{"distance":-2.0}}}}]}}
 
-User: move to the red object
-{{"tasks":[{{"category":"motor","tool":"goto_visual_target","args":{{"description":"red object"}}}}]}}
+User: go to purple block then to yellow block then to teal block
+{{"tasks":[{{"category":"motor","tool":"goto_landmark","args":{{"name":"purple"}}}},{{"category":"motor","tool":"goto_landmark","args":{{"name":"yellow"}}}},{{"category":"motor","tool":"goto_landmark","args":{{"name":"teal"}}}}]}}
 
-User: go to the blue marker
-{{"tasks":[{{"category":"motor","tool":"goto_visual_target","args":{{"description":"blue marker"}}}}]}}
+User: look around for green and go near it
+{{"tasks":[{{"category":"motor","tool":"goto_landmark","args":{{"name":"green"}}}}]}}
+
+User: go from orange to cyan to brown to magenta
+{{"tasks":[{{"category":"motor","tool":"goto_landmark","args":{{"name":"orange"}}}},{{"category":"motor","tool":"goto_landmark","args":{{"name":"cyan"}}}},{{"category":"motor","tool":"goto_landmark","args":{{"name":"brown"}}}},{{"category":"motor","tool":"goto_landmark","args":{{"name":"magenta"}}}}]}}
+
+User: go to brown box then come to yellow box
+{{"tasks":[{{"category":"motor","tool":"goto_landmark","args":{{"name":"brown"}}}},{{"category":"motor","tool":"goto_landmark","args":{{"name":"yellow"}}}}]}}
+
+User: find pink and then go to teal
+{{"tasks":[{{"category":"motor","tool":"goto_landmark","args":{{"name":"pink"}}}},{{"category":"motor","tool":"goto_landmark","args":{{"name":"teal"}}}}]}}
+
+User: assess the terrain ahead
+{{"tasks":[{{"category":"motor","tool":"assess_terrain","args":{{}}}}]}}
+
+User: climb the stairs
+{{"tasks":[{{"category":"motor","tool":"climb_stairs","args":{{"direction":"up"}}}}]}}
 
 User: {user_message}
 """
@@ -106,13 +125,18 @@ def build_planner_prompt(
 
 
 def extract_json_object(text: str) -> Optional[dict]:
-    """Extract the first balanced JSON object from model output."""
+    """Extract the first balanced JSON object from model output.
+
+    Handles common VLM quirks: markdown fences, missing trailing braces.
+    """
     if not text:
         return None
     s = text.strip()
-    fence = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", s, re.DOTALL | re.IGNORECASE)
+
+    # Strip markdown code fences if present
+    fence = re.search(r"```(?:json)?\s*(.*?)\s*```", s, re.DOTALL | re.IGNORECASE)
     if fence:
-        s = fence.group(1)
+        s = fence.group(1).strip()
 
     start = s.find("{")
     if start < 0:
@@ -146,6 +170,16 @@ def extract_json_object(text: str) -> Optional[dict]:
                 except json.JSONDecodeError as e:
                     logger.warning("[MODEL_PLAN] JSON decode failed: %s", e)
                     return None
+
+    # VLMs sometimes omit trailing braces — try appending them
+    if depth > 0:
+        blob = s[start:] + "}" * depth
+        logger.info("[MODEL_PLAN] Unbalanced JSON (depth=%d), appending %d closing brace(s)", depth, depth)
+        try:
+            return json.loads(blob)
+        except json.JSONDecodeError as e:
+            logger.warning("[MODEL_PLAN] JSON repair failed: %s", e)
+            return None
 
     logger.warning("[MODEL_PLAN] No balanced JSON object found")
     return None
@@ -211,11 +245,23 @@ def execute_task_plan(
 
         if cat == "visual":
             mode = str(task.get("visual_mode", "camera")).lower().strip()
+            # Check if next task is goto_landmark — skip or use targeted prompt
+            next_task = tasks[i + 1] if i + 1 < len(tasks) else None
+            next_is_goto = (next_task and isinstance(next_task, dict)
+                            and str(next_task.get("tool", "")).strip() == "goto_landmark")
             if mode == "memory":
                 results.append(tools.describe_scene())
             elif mode == "around" or mode == "scan":
+                if next_is_goto:
+                    logger.info("[MODEL_PLAN] Skipping redundant visual scan before goto_landmark")
+                    continue
                 results.append(look_around_fn())
             else:
+                if next_is_goto:
+                    # goto_landmark already does a fast 360° visual scan — skip slow VLM look
+                    target = str(next_task.get("args", {}).get("name", ""))
+                    logger.info("[MODEL_PLAN] Skipping VLM camera look before goto_landmark('%s')", target)
+                    continue
                 results.append(tools.look())
             continue
 
@@ -272,7 +318,7 @@ def run_model_planner(
     prompt = build_planner_prompt(
         user_message, scene_context, names, robot_pos, robot_yaw_rad, heading_deg,
     )
-    raw = generate_text(prompt, max_new_tokens=128)
+    raw = generate_text(prompt, max_new_tokens=512)
     if not raw:
         logger.warning("[MODEL_PLAN] Empty model response")
         return None

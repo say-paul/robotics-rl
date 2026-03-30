@@ -46,8 +46,8 @@ from lerobot.robots.unitree_g1.g1_utils import (
 logger = logging.getLogger(__name__)
 
 DEFAULT_SPEED = 0.3        # normalised forward velocity [-1, 1]
-DEFAULT_TURN_RATE = 0.5    # normalised yaw rate for turns
-TURN_TOLERANCE_DEG = 5.0   # acceptable heading error after a turn
+DEFAULT_TURN_RATE = 0.35   # normalised yaw rate for turns (lower = more precise)
+TURN_TOLERANCE_DEG = 2.0   # acceptable heading error after a turn
 
 
 class ControlMode(Enum):
@@ -183,13 +183,20 @@ class MotorCortex:
 
         if self._odometry:
             self._odometry.reset()
+            heading0 = self._odometry.heading_rad
             self.set_velocity(speed, 0.0, 0.0)
             timeout = target_dist / max(abs(speed), 0.05) + 8.0
             t0 = time.time()
+            drift_total = 0.0
 
             while time.time() - t0 < timeout:
                 if self._odometry.total_distance >= target_dist * 0.95:
                     break
+                # Heading-hold autopilot: P-controller corrects yaw drift
+                drift = _angle_diff(self._odometry.heading_rad, heading0)
+                yaw_corr = float(np.clip(-1.5 * drift, -0.4, 0.4))
+                drift_total += abs(drift)
+                self.set_velocity(speed, 0.0, yaw_corr)
                 time.sleep(0.05)
 
             self.halt()
@@ -197,6 +204,7 @@ class MotorCortex:
             imu_heading = self._odometry.heading_deg
             step_count = self._odometry.step_count
             stride = self._odometry.stride_length
+            drift_deg = math.degrees(_angle_diff(self._odometry.heading_rad, heading0))
 
             pos_final = self._get_pos()
             qpos_dist = float(np.linalg.norm(pos_final[:2] - pos0[:2]))
@@ -208,6 +216,7 @@ class MotorCortex:
                 f"qpos: {qpos_dist:.2f}m at ({pos_final[0]:.2f}, {pos_final[1]:.2f}). "
                 f"Error: {error:+.2f}m."
             )
+            logger.info("[MOTOR:MOVE] drift=%.1f° during walk", drift_deg)
         else:
             self.set_velocity(speed, 0.0, 0.0)
             timeout = target_dist / max(abs(speed), 0.05) + 8.0
@@ -227,8 +236,8 @@ class MotorCortex:
                 f"heading {yaw_deg:.0f}°."
             )
 
-        logger.info("[MOTOR:MOVE] distance=%.1f speed=%.2f dir=%s -> %s",
-                     distance, speed, direction, results[-1][:60])
+        logger.info("[MOTOR:MOVE] distance=%.1f speed=%.2f dir=%s drift=auto -> %s",
+                     distance, speed, direction, results[-1][:80])
         return " ".join(results)
 
     def turn_degrees(self, degrees: float) -> str:

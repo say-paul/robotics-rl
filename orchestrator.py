@@ -88,6 +88,7 @@ class Orchestrator:
         self._stop_requested = False
         self._harness_releasing = False
         self._harness_lower_remaining = 0
+        self._randomize_pending = False
 
         # Simulation (full physics)
         self.sim = G1Simulation(scene_name=scene_name, headless=headless)
@@ -220,6 +221,9 @@ class Orchestrator:
             ),
         )
 
+        # Randomize blocks (thread-safe)
+        tools.set_randomize_fn(self._randomize_blocks)
+
         # Visual navigation: provide sim state so goto_visual_target can track position
         tools.set_sim_state_fn(
             lambda: (self.sim.get_base_position(), self.sim.get_base_yaw()),
@@ -254,6 +258,18 @@ class Orchestrator:
         self._harness_releasing = True
         self._harness_lower_remaining = 10
         logger.info("Releasing harness: lowering...")
+
+    def _randomize_blocks(self) -> str:
+        """Thread-safe: set flag and wait for sim loop to do the actual mutation."""
+        self._randomize_pending = True
+        deadline = time.monotonic() + 5.0
+        while self._randomize_pending and time.monotonic() < deadline:
+            time.sleep(0.05)
+        positions = self.sim.get_marker_positions()
+        lines = ["Blocks randomized to new positions:"]
+        for name, pos in sorted(positions.items()):
+            lines.append(f"  {name}: ({pos[0]:.1f}, {pos[1]:.1f})")
+        return "\n".join(lines)
 
     def _request_quit(self) -> None:
         """Called by the quit_simulation tool."""
@@ -341,6 +357,10 @@ class Orchestrator:
                 request = self.brain.decide()
                 if request is not None:
                     self._execute_request(request)
+
+                if self._randomize_pending:
+                    self.sim._randomize_markers()
+                    self._randomize_pending = False
 
                 if self._harness_releasing:
                     if self._harness_lower_remaining > 0:
@@ -495,7 +515,7 @@ def main():
                         help="Path to VLA model weights (default: models/<model_name>)")
     parser.add_argument("--vlm-model", type=str, default=None,
                         choices=["paligemma", "paligemma2", "paligemma3b", "qwen2vl", "moondream",
-                                 "smolvlm", "smolvlm500m"],
+                                 "smolvlm", "smolvlm500m", "gemma3"],
                         help="VLM model for perception + planning")
     parser.add_argument("--vlm-model-path", type=str, default=None,
                         help="Path to VLM model weights")

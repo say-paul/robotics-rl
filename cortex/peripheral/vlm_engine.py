@@ -81,6 +81,13 @@ MODEL_REGISTRY = {
         "image_size": 512,
         "type": "smolvlm",
     },
+    "gemma3": {
+        "repo": "OpenVINO/gemma-3-4b-it-int4-ov",
+        "local": "/home/hf-datasets/gemma-3-4b-it-int4-ov",
+        "image_size": 896,
+        "type": "gemma3_ov",
+        "abs_path": True,
+    },
 }
 
 
@@ -196,7 +203,9 @@ class VLMEngine:
 
         try:
             model_type = self.model_info.get("type", "paligemma")
-            if model_type == "smolvlm":
+            if model_type == "gemma3_ov":
+                self._load_gemma3_ov()
+            elif model_type == "smolvlm":
                 self._load_smolvlm()
             elif model_type == "qwen2vl":
                 self._load_qwen2vl()
@@ -339,6 +348,77 @@ class VLMEngine:
         logger.info("SmolVLM loaded via OpenVINO on %s (img=768, 5 patches)",
                      get_openvino_device_str(self._device_type))
 
+    def _load_gemma3_ov(self) -> None:
+        """Load Gemma 3 4B IT INT4 via openvino_genai.VLMPipeline.
+
+        Loads a GPU pipeline for fast text-only generation (planning JSON)
+        and a CPU pipeline for image+text (vision encoder too large for iGPU).
+        """
+        import openvino_genai as ov_genai
+
+        self._ov_genai = ov_genai
+        self._gemma3_lock = threading.Lock()
+        self._gemma3_gpu_pipe = None
+        self._gemma3_cpu_pipe = None
+
+        # GPU pipeline for text-only planning (~1s vs ~5s on CPU)
+        try:
+            logger.info("Loading Gemma3-OV GPU pipeline (text-only) from %s ...", self._model_path)
+            self._gemma3_gpu_pipe = ov_genai.VLMPipeline(str(self._model_path), "GPU")
+            logger.info("Gemma3-OV GPU pipeline loaded (for fast planning)")
+        except Exception as e:
+            logger.warning("Gemma3-OV GPU load failed: %s — will use CPU for all", e)
+
+        # CPU pipeline for image+text (vision encoder OOMs on iGPU)
+        logger.info("Loading Gemma3-OV CPU pipeline (image+text) ...")
+        self._gemma3_cpu_pipe = ov_genai.VLMPipeline(str(self._model_path), "CPU")
+        logger.info("Gemma3-OV CPU pipeline loaded (for image captioning)")
+
+        self._model = self._gemma3_cpu_pipe
+        self._model_type = "gemma3_ov"
+
+    def _image_to_ov_tensor(self, image: np.ndarray):
+        """Convert a numpy RGB image to an OpenVINO tensor for Gemma3."""
+        import openvino as ov
+        if image.dtype != np.uint8:
+            image = (image * 255).astype(np.uint8)
+        h, w = image.shape[:2]
+        data = image.reshape(1, h, w, 3).astype(np.uint8)
+        return ov.Tensor(data)
+
+    def _caption_gemma3_ov(self, image: np.ndarray, prompt: str) -> str:
+        """Gemma3-OV: image + prompt → text. Uses CPU pipeline (vision OOMs iGPU)."""
+        pipe = self._gemma3_cpu_pipe
+        if pipe is None:
+            return "Gemma3 CPU pipeline not available."
+        with self._gemma3_lock:
+            ov_image = self._image_to_ov_tensor(image)
+            config = self._ov_genai.GenerationConfig()
+            config.max_new_tokens = self._max_new_tokens
+            config.do_sample = False
+            pipe.start_chat()
+            try:
+                output = pipe.generate(prompt, image=ov_image, generation_config=config)
+            finally:
+                pipe.finish_chat()
+            return str(output) if not isinstance(output, str) else output
+
+    def _generate_text_gemma3_ov(self, prompt: str, max_new_tokens: int) -> str:
+        """Gemma3-OV: text-only generation. Prefers GPU pipeline for speed."""
+        pipe = self._gemma3_gpu_pipe or self._gemma3_cpu_pipe
+        if pipe is None:
+            return ""
+        with self._gemma3_lock:
+            config = self._ov_genai.GenerationConfig()
+            config.max_new_tokens = max_new_tokens
+            config.do_sample = False
+            pipe.start_chat()
+            try:
+                output = pipe.generate(prompt, generation_config=config)
+            finally:
+                pipe.finish_chat()
+            return str(output) if not isinstance(output, str) else output
+
     @torch.no_grad()
     def caption(self, image: np.ndarray, prompt: str = "Describe what you see.") -> str:
         """Run full VLM inference: image + prompt → text description."""
@@ -354,7 +434,9 @@ class VLMEngine:
 
         model_type = getattr(self, "_model_type", "paligemma")
 
-        if model_type in ("smolvlm", "smolvlm_ov"):
+        if model_type == "gemma3_ov":
+            text = self._caption_gemma3_ov(image, prompt)
+        elif model_type in ("smolvlm", "smolvlm_ov"):
             text = self._caption_smolvlm(pil_img, prompt)
         elif model_type == "qwen2vl":
             text = self._caption_qwen2vl(pil_img, prompt)
@@ -430,7 +512,9 @@ class VLMEngine:
         img_size = self.model_info.get("image_size", 224)
         dummy_img = PILImage.new("RGB", (img_size, img_size), (128, 128, 128))
 
-        if model_type in ("smolvlm", "smolvlm_ov"):
+        if model_type == "gemma3_ov":
+            text = self._generate_text_gemma3_ov(prompt, max_new_tokens=max_tok)
+        elif model_type in ("smolvlm", "smolvlm_ov"):
             text = self._generate_text_smolvlm(prompt, max_new_tokens=max_tok)
         elif model_type == "qwen2vl":
             text = self._generate_text_qwen2vl(prompt, max_new_tokens=max_tok)
@@ -492,6 +576,10 @@ class VLMEngine:
         self._moondream_dummy_enc = None
         self._model = None
         self._processor = None
+        if hasattr(self, "_gemma3_gpu_pipe"):
+            self._gemma3_gpu_pipe = None
+        if hasattr(self, "_gemma3_cpu_pipe"):
+            self._gemma3_cpu_pipe = None
         self._loaded = False
         torch.cuda.empty_cache() if torch.cuda.is_available() else None
         logger.info("VLMEngine closed")

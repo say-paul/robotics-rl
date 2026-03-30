@@ -1,0 +1,82 @@
+<mujoco model="stair_training">
+  <!--
+    Stair-climbing RL training arena.
+    6-step staircase up, platform, 6-step down, goal marker.
+    Robot spawns at x=-2 facing +X.
+  -->
+
+  <include file="g1_29dof_no_hand.xml"/>
+
+  <statistic center="3 0 0.7" extent="5.0"/>
+  <option timestep="0.004"/>
+
+  <visual>
+    <headlight diffuse="0.7 0.7 0.7" ambient="0.35 0.35 0.35" specular="0 0 0"/>
+    <rgba haze="0.15 0.25 0.35 1"/>
+    <global azimuth="-130" elevation="-20"/>
+  </visual>
+
+  <asset>
+    <texture type="skybox" builtin="gradient" rgb1="0.4 0.6 0.8" rgb2="0.05 0.05 0.1"
+             width="512" height="3072"/>
+    <texture type="2d" name="groundplane" builtin="checker" mark="edge"
+             rgb1="0.25 0.25 0.25" rgb2="0.18 0.18 0.18" markrgb="0.4 0.4 0.4"
+             width="300" height="300"/>
+    <texture type="2d" name="stair_tex" builtin="flat" rgb1="0.50 0.35 0.20" width="64" height="64"/>
+    <texture type="2d" name="platform_tex" builtin="flat" rgb1="0.35 0.22 0.12" width="64" height="64"/>
+    <texture type="2d" name="goal_tex" builtin="flat" rgb1="0.1 0.8 0.2" width="64" height="64"/>
+
+    <material name="groundplane" texture="groundplane" texuniform="true" texrepeat="5 5" reflectance="0.15"/>
+    <material name="stair_mat" texture="stair_tex" texuniform="true" reflectance="0.05"/>
+    <material name="platform_mat" texture="platform_tex" texuniform="true" reflectance="0.1"/>
+    <material name="goal_mat" texture="goal_tex" emission="0.5"/>
+    <material name="wall_mat" rgba="0.4 0.4 0.4 0.3"/>
+  </asset>
+
+  <worldbody>
+    <light pos="3 0 5" dir="0 0 -1" directional="true"/>
+    <light pos="-2 -3 4" dir="0.3 0.3 -1" diffuse="0.3 0.3 0.25"/>
+
+    <geom name="floor" size="15 5 0.05" type="plane" material="groundplane"/>
+
+    <!-- UP staircase: 6 steps, 0.20m high x 0.40m deep -->
+    <body name="stairs_up" pos="0 0 0">
+      <geom name="up_step_1" type="box" pos="0.2 0 0.10" size="0.2 0.8 0.10" material="stair_mat"/>
+      <geom name="up_step_2" type="box" pos="0.6 0 0.30" size="0.2 0.8 0.10" material="stair_mat"/>
+      <geom name="up_step_3" type="box" pos="1.0 0 0.50" size="0.2 0.8 0.10" material="stair_mat"/>
+      <geom name="up_step_4" type="box" pos="1.4 0 0.70" size="0.2 0.8 0.10" material="stair_mat"/>
+      <geom name="up_step_5" type="box" pos="1.8 0 0.90" size="0.2 0.8 0.10" material="stair_mat"/>
+      <geom name="up_step_6" type="box" pos="2.2 0 1.10" size="0.2 0.8 0.10" material="stair_mat"/>
+    </body>
+
+    <body name="platform" pos="3.7 0 0.60">
+      <geom name="platform_top" type="box" size="1.3 1.0 0.60" material="platform_mat"/>
+    </body>
+
+    <!-- DOWN staircase -->
+    <body name="stairs_down" pos="5.0 0 0">
+      <geom name="down_step_1" type="box" pos="0.2 0 1.10" size="0.2 0.8 0.10" material="stair_mat"/>
+      <geom name="down_step_2" type="box" pos="0.6 0 0.90" size="0.2 0.8 0.10" material="stair_mat"/>
+      <geom name="down_step_3" type="box" pos="1.0 0 0.70" size="0.2 0.8 0.10" material="stair_mat"/>
+      <geom name="down_step_4" type="box" pos="1.4 0 0.50" size="0.2 0.8 0.10" material="stair_mat"/>
+      <geom name="down_step_5" type="box" pos="1.8 0 0.30" size="0.2 0.8 0.10" material="stair_mat"/>
+      <geom name="down_step_6" type="box" pos="2.2 0 0.10" size="0.2 0.8 0.10" material="stair_mat"/>
+    </body>
+
+    <body name="goal_marker" pos="8.5 0 0.25">
+      <geom name="goal_geom" type="box" size="0.3 0.3 0.3" material="goal_mat" contype="0" conaffinity="0"/>
+    </body>
+
+    <geom name="wall_left"  type="box" pos="3.7  1.0 0.8" size="6.0 0.05 0.8" material="wall_mat" contype="0" conaffinity="0"/>
+    <geom name="wall_right" type="box" pos="3.7 -1.0 0.8" size="6.0 0.05 0.8" material="wall_mat" contype="0" conaffinity="0"/>
+
+    <site name="com_marker" pos="0 0 0" size="0.05" rgba="1 0 0 1" type="sphere"/>
+    <site name="left_hand_marker" pos="0 0 0" size="0.025" rgba="0 1 0 1" type="sphere"/>
+    <site name="right_hand_marker" pos="0 0 0" size="0.025" rgba="0 1 0 1" type="sphere"/>
+    <site name="left_foot_marker" pos="0 0 0" size="0.025" rgba="1 0 0 1" type="sphere"/>
+    <site name="right_foot_marker" pos="0 0 0" size="0.025" rgba="1 0 0 1" type="sphere"/>
+
+    <camera name="global_view" pos="3 -6 4" xyaxes="1 0 0 0 0.5 0.866"/>
+    <camera name="side_view" pos="3 -4 2" xyaxes="1 0 0 0 0.3 0.95"/>
+  </worldbody>
+</mujoco>
