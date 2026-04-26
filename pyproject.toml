@@ -1,0 +1,28 @@
+[build-system]
+requires = ["setuptools>=45", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "rdp-demo"
+version = "1.0.0"
+description = "Robot Deployment Package - YAML-driven robot deployment for GR00T VLA + WBC"
+readme = "README.md"
+requires-python = ">=3.10"
+license = {text = "MIT"}
+keywords = ["robotics", "whole-body-control", "vla", "groot", "unitree", "mujoco"]
+
+dependencies = [
+    "numpy>=1.20.0",
+    "PyYAML>=5.4",
+    "mujoco>=3.0.0",
+    "onnxruntime>=1.15.0",
+]
+
+[project.optional-dependencies]
+huggingface = ["huggingface-hub>=0.16.0"]
+
+[project.urls]
+Repository = "https://github.com/NVlabs/GR00T-WholeBodyControl"
+
+[tool.setuptools]
+packages = []

@@ -1,0 +1,7 @@
+numpy>=1.20.0
+PyYAML>=5.4
+mujoco>=3.0.0
+onnxruntime>=1.15.0
+
+# Optional: model download from HuggingFace
+# huggingface-hub>=0.16.0

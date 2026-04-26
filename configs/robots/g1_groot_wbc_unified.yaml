@@ -1,0 +1,513 @@
+# ============================================================================
+# Unified Robot Definition: Unitree G1 + GR00T N1.6 VLA + Decoupled WBC
+# ============================================================================
+# This manifest integrates:
+# - GR00T N1.6 VLA (high-level reasoning)
+# - Decoupled WBC (low-level control)
+# - Adapter layer (bridges VLA → WBC)
+# ============================================================================
+
+# ----------------------------------------------------------------------------
+# STAGE 0: Variables
+# ----------------------------------------------------------------------------
+variables:
+  GROOT_WBC_ROOT: "/home/saypaul/GR00T-WholeBodyControl"
+  RDP_ROOT: "/home/saypaul/git_repos/rdp-demo"
+
+# ----------------------------------------------------------------------------
+# STAGE 1: Metadata
+# ----------------------------------------------------------------------------
+metadata:
+  name: "g1_groot_n16_decoupled_wbc"
+  version: "1.0.0"
+  robot_type: "humanoid"
+  manufacturer: "Unitree"
+  description: "G1 humanoid with GR00T N1.6 VLA + Decoupled WBC"
+  hardware_revision: "G1-2024"
+  software_revision: "GR00T-N1.6-WBC-v1.0"
+
+# ----------------------------------------------------------------------------
+# STAGE 2: Hardware Definition
+# ----------------------------------------------------------------------------
+hardware:
+  description:
+    urdf:
+      file: "${GROOT_WBC_ROOT}/decoupled_wbc/control/robot_model/model_data/g1/g1_29dof.urdf"
+      mesh_directory: "${GROOT_WBC_ROOT}/decoupled_wbc/control/robot_model/model_data/g1/meshes"
+    mujoco_scene:
+      file: "${GROOT_WBC_ROOT}/gear_sonic_deploy/g1/scene_29dof.xml"
+
+  sensors:
+    - name: "torso_imu"
+      type: "imu"
+      topic: "/imu/data"
+      frame_id: "torso_link"
+      rate_hz: 500
+
+    - name: "head_camera_rgb"
+      type: "camera"
+      modality: "rgb"
+      topic: "/camera/rgb/image_raw"
+      resolution: [640, 480]
+      rate_hz: 30
+
+  actuators:
+    - name: "body_joints"
+      type: "position_velocity_torque"
+      control_mode: "position"
+      count: 29
+      joint_names: "defined_in_urdf"
+
+# ----------------------------------------------------------------------------
+# STAGE 3: Models
+# ----------------------------------------------------------------------------
+models:
+  # -------------------------
+  # VLA Model (High-Level)
+  # -------------------------
+  - name: "groot_vla_n16"
+    type: "vision_language_action"
+    framework: "onnx"
+    runtime: "tensorrt"
+    precision: "fp16"
+    model_path: "models/groot/GR00T-N1.6-3B.onnx"  # Downloaded from Isaac-GR00T
+    download:
+      enabled: true
+      source: "huggingface"
+      repo: "nvidia/GR00T-N1.6-3B"
+      files:
+        - "model.onnx"
+      target_path: "models/groot/"
+    embodiment_tag: "UNITREE_G1_RELATIVE_EEF"
+    input:
+      - name: "rgb_image"
+        shape: [1, 3, 480, 640]  # Variable resolution supported
+        dtype: "float32"
+      - name: "language_prompt"
+        shape: [1, 512]  # Tokenized text
+        dtype: "int32"
+      - name: "robot_state"
+        shape: [1, 43]  # Proprioception (joint pos/vel + base state)
+        dtype: "float32"
+    output:
+      - name: "action_deltas"
+        shape: [1, 8, 14]  # [batch, action_horizon, action_dim]
+        dtype: "float32"
+        format: "relative_eef"  # xyz(3) + quat(4) + gripper(1) per step
+        description: "Relative end-effector deltas over 8 timesteps"
+
+  # -------------------------
+  # Adapter Layer
+  # -------------------------
+  - name: "groot_to_wbc_adapter"
+    type: "adapter"
+    framework: "python"
+    script_path: "${RDP_ROOT}/robot_src/adapters/groot_to_wbc_adapter.py"
+    class_name: "GR00TToWBCAdapter"
+    input:
+      - name: "action_deltas"
+        shape: [1, 8, 14]
+        dtype: "float32"
+      - name: "current_robot_state"
+        shape: [1, 43]
+        dtype: "float32"
+    output:
+      - name: "wbc_goal"
+        type: "dict"
+        fields:
+          target_upper_body_pose: [29]  # Joint angles
+          navigate_cmd: [3]              # [vx, vy, vyaw]
+          base_height_command: [1]
+          target_time: "float"
+
+  # -------------------------
+  # Lower Body RL Policy
+  # -------------------------
+  - name: "lower_body_rl_policy"
+    type: "locomotion_policy"
+    framework: "onnx"
+    runtime: "onnxruntime"
+    precision: "fp32"
+    model_paths:
+      balance: "${GROOT_WBC_ROOT}/decoupled_wbc/sim2mujoco/resources/robots/g1/policy/GR00T-WholeBodyControl-Balance.onnx"
+      walk: "${GROOT_WBC_ROOT}/decoupled_wbc/sim2mujoco/resources/robots/g1/policy/GR00T-WholeBodyControl-Walk.onnx"
+    input:
+      - name: "observation"
+        shape: [1, 516]  # 86-dim x 6 history
+        dtype: "float32"
+    output:
+      - name: "lower_body_action"
+        shape: [1, 15]  # Legs (12) + waist (3)
+        dtype: "float32"
+
+  # -------------------------
+  # Upper Body IK Policy
+  # -------------------------
+  - name: "upper_body_interpolation_policy"
+    type: "interpolation_policy"
+    framework: "python"
+    script_path: "${GROOT_WBC_ROOT}/decoupled_wbc/control/policy/interpolation_policy.py"
+    class_name: "InterpolationPolicy"
+    config:
+      max_change_rate: 2.0  # rad/s
+    input:
+      - name: "target_upper_body_pose"
+        shape: [14]  # Arms (12) + hands (2)
+        dtype: "float32"
+      - name: "target_time"
+        dtype: "float"
+    output:
+      - name: "upper_body_action"
+        shape: [14]
+        dtype: "float32"
+
+  # -------------------------
+  # Whole Body Policy Combiner
+  # -------------------------
+  - name: "decoupled_wbc_policy"
+    type: "whole_body_controller"
+    framework: "python"
+    script_path: "${GROOT_WBC_ROOT}/decoupled_wbc/control/policy/g1_decoupled_whole_body_policy.py"
+    class_name: "G1DecoupledWholeBodyPolicy"
+    input:
+      - name: "lower_body_action"
+        shape: [1, 15]
+        dtype: "float32"
+      - name: "upper_body_action"
+        shape: [14]
+        dtype: "float32"
+    output:
+      - name: "joint_commands"
+        shape: [1, 29]
+        dtype: "float32"
+
+# ----------------------------------------------------------------------------
+# STAGE 4: Execution Graph
+# ----------------------------------------------------------------------------
+execution:
+  orchestration_mode: "multi_threaded"
+
+  nodes:
+    # -------------------------
+    # VLA Inference (5 Hz)
+    # -------------------------
+    - name: "groot_vla_inference"
+      model: "groot_vla_n16"
+      device: "gpu:0"
+      frequency_hz: 5
+      thread_priority: "normal"
+      runtime_config:
+        action_horizon: 8
+        num_inference_steps: 10  # Diffusion steps
+
+    # -------------------------
+    # Adapter (5 Hz, synced with VLA)
+    # -------------------------
+    - name: "adapter"
+      model: "groot_to_wbc_adapter"
+      device: "cpu"
+      frequency_hz: 5
+      thread_priority: "normal"
+
+    # -------------------------
+    # Lower Body RL (50 Hz)
+    # -------------------------
+    - name: "lower_body_policy"
+      model: "lower_body_rl_policy"
+      device: "cpu"
+      frequency_hz: 50
+      thread_priority: "high"
+
+    # -------------------------
+    # Upper Body Interpolation (50 Hz)
+    # -------------------------
+    - name: "upper_body_policy"
+      model: "upper_body_interpolation_policy"
+      device: "cpu"
+      frequency_hz: 50
+      thread_priority: "high"
+
+    # -------------------------
+    # WBC Combiner (50 Hz)
+    # -------------------------
+    - name: "wbc_combiner"
+      model: "decoupled_wbc_policy"
+      device: "cpu"
+      frequency_hz: 50
+      thread_priority: "realtime"
+
+  # -------------------------
+  # Data Flow
+  # -------------------------
+  dataflow:
+    - camera.rgb_image, language_input, robot_state → groot_vla_inference → action_deltas
+    - action_deltas, robot_state → adapter → wbc_goal
+    - wbc_goal.navigate_cmd, robot_state → lower_body_policy → lower_body_action
+    - wbc_goal.target_upper_body_pose → upper_body_policy → upper_body_action
+    - lower_body_action, upper_body_action → wbc_combiner → joint_commands
+    - joint_commands → actuators
+
+# ----------------------------------------------------------------------------
+# STAGE 5: Configuration
+# ----------------------------------------------------------------------------
+configuration:
+  # VLA Configuration
+  vla:
+    enabled: true
+    model_type: "groot_n16"
+    embodiment: "UNITREE_G1_RELATIVE_EEF"
+    action_horizon: 8
+    inference_steps: 10
+    use_fp16: true
+
+  # WBC Configuration (inlined from g1_gear_wbc.yaml)
+  wbc:
+    type: "decoupled"
+    num_actions: 15
+    num_obs: 516
+    obs_history_len: 6
+    single_obs_dim: 86
+
+    default_angles: [-0.1, 0.0, 0.0, 0.3, -0.2, 0.0,
+                     -0.1, 0.0, 0.0, 0.3, -0.2, 0.0,
+                      0.0, 0.0, 0.0]
+
+    kps: [150, 150, 150, 200, 40, 40,
+          150, 150, 150, 200, 40, 40,
+          250, 250, 250]
+    kds: [2.0, 2.0, 2.0, 4.0, 2.0, 2.0,
+          2.0, 2.0, 2.0, 4.0, 2.0, 2.0,
+          5.0, 5.0, 5.0]
+
+    arm_kp: 100.0
+    arm_kd: 0.5
+    action_scale: 0.25
+
+    dof_pos_scale: 1.0
+    dof_vel_scale: 0.05
+    ang_vel_scale: 0.5
+    cmd_scale: [2.0, 2.0, 0.5]
+
+    cmd_init: [0.0, 0.0, 0.0]
+    height_cmd: 0.74
+    rpy_cmd: [0.0, 0.0, 0.0]
+
+    lower_body:
+      type: "rl_policy"
+      model_mode: "walk"  # or "balance"
+    upper_body:
+      type: "interpolation"
+      max_change_rate: 2.0
+
+  # Adapter Configuration
+  adapter:
+    ik_solver: "pinocchio"
+    eef_tracking:
+      left_hand: true
+      right_hand: true
+    navigation_extraction:
+      method: "velocity_from_eef_delta"
+
+  # Timing
+  simulation_dt: 0.005
+  control_decimation: 4
+  control_frequency_hz: 50
+  vla_frequency_hz: 5
+
+  # Safety
+  safety:
+    joint_limits_check: true
+    velocity_limits_check: true
+    emergency_stop_topic: "/emergency_stop"
+    timeout_ms: 1000
+
+# ----------------------------------------------------------------------------
+# STAGE 6: External Interfaces
+# ----------------------------------------------------------------------------
+interfaces:
+  # Language Input
+  - name: "voice_command"
+    type: "network"
+    protocol: "grpc"
+    endpoint: "localhost:50051"
+    service: "VoiceCommandService"
+
+  # Camera Input
+  - name: "head_camera_server"
+    type: "network"
+    protocol: "zmq"
+    endpoint: "tcp://192.168.123.164:5555"
+    topic: "rgb_image"
+
+  # Robot State Publisher
+  - name: "robot_state_publisher"
+    type: "network"
+    protocol: "zmq"
+    endpoint: "tcp://localhost:5557"
+    topics:
+      - "g1_state"
+      - "robot_config"
+
+# ----------------------------------------------------------------------------
+# STAGE 7: Application Execution
+# ----------------------------------------------------------------------------
+application:
+  # Launcher configuration
+  launcher:
+    type: "tmux"  # or "docker", "systemd", "kubernetes"
+    session_name: "g1_groot_wbc"
+
+  # Pre-launch setup
+  setup:
+    - name: "Download GR00T Model"
+      command: "python ${RDP_ROOT}/scripts/download_groot_model.py --version n1.6"
+      required: true
+
+    - name: "Verify WBC Models"
+      command: "ls ${GROOT_WBC_ROOT}/decoupled_wbc/sim2mujoco/resources/robots/g1/policy/*.onnx"
+      required: true
+
+    - name: "Check Camera Connection"
+      command: "python ${RDP_ROOT}/scripts/check_camera.py --host 192.168.123.164"
+      required: false
+
+  # Service definitions
+  services:
+    - name: "groot_vla_server"
+      command: "python ${RDP_ROOT}/robot_src/services/groot_vla_service.py --config g1_groot_wbc_unified.yaml"
+      working_dir: "${RDP_ROOT}"
+      environment:
+        CUDA_VISIBLE_DEVICES: "0"
+        ORT_TENSORRT_ENGINE_CACHE: "./cache/trt_engines"
+      restart_policy: "always"
+      health_check:
+        endpoint: "http://localhost:8001/health"
+        interval_seconds: 10
+
+    - name: "adapter_service"
+      command: "python ${RDP_ROOT}/robot_src/services/adapter_service.py --config g1_groot_wbc_unified.yaml"
+      working_dir: "${RDP_ROOT}"
+      depends_on:
+        - "groot_vla_server"
+      restart_policy: "always"
+
+    - name: "wbc_control_loop"
+      command: "python ${GROOT_WBC_ROOT}/decoupled_wbc/control/main/teleop/run_g1_control_loop.py --config g1_groot_wbc_unified.yaml --interface real"
+      working_dir: "${RDP_ROOT}"
+      depends_on:
+        - "adapter_service"
+      restart_policy: "always"
+      priority: "realtime"
+
+    - name: "camera_server"
+      command: "python ${GROOT_WBC_ROOT}/gear_sonic/camera/composed_camera.py --ego-view-camera oak --port 5555"
+      working_dir: "${GROOT_WBC_ROOT}"
+      host: "192.168.123.164"  # Run on robot computer
+      restart_policy: "always"
+
+  # Launch sequence
+  launch_sequence:
+    - stage: "infrastructure"
+      services:
+        - "camera_server"
+      wait_for_ready: true
+      timeout_seconds: 30
+
+    - stage: "models"
+      services:
+        - "groot_vla_server"
+      wait_for_ready: true
+      timeout_seconds: 60
+
+    - stage: "adapters"
+      services:
+        - "adapter_service"
+      wait_for_ready: true
+      timeout_seconds: 10
+
+    - stage: "control"
+      services:
+        - "wbc_control_loop"
+      wait_for_ready: true
+      timeout_seconds: 20
+
+  # Shutdown sequence (reverse order)
+  shutdown_sequence:
+    - "wbc_control_loop"
+    - "adapter_service"
+    - "groot_vla_server"
+    - "camera_server"
+
+  # Launch command (unified entry point)
+  launch_command: "python ${RDP_ROOT}/scripts/launch_robot.py --config g1_groot_wbc_unified.yaml"
+
+# ----------------------------------------------------------------------------
+# STAGE 8: Monitoring & Debugging
+# ----------------------------------------------------------------------------
+monitoring:
+  telemetry:
+    enabled: true
+    publish_frequency_hz: 10
+    topics:
+      - "system/cpu_usage"
+      - "system/gpu_usage"
+      - "system/memory_usage"
+      - "robot/joint_states"
+      - "robot/inference_latency"
+
+  logging:
+    level: "INFO"  # DEBUG, INFO, WARN, ERROR
+    output:
+      - type: "file"
+        path: "logs/g1_groot_wbc_{timestamp}.log"
+      - type: "console"
+        format: "colored"
+
+  visualization:
+    enabled: true
+    tools:
+      - type: "meshcat"
+        port: 7000
+      - type: "plotjuggler"
+        config: "configs/plotjuggler_layout.xml"
+
+# ----------------------------------------------------------------------------
+# STAGE 9: Deployment Profiles
+# ----------------------------------------------------------------------------
+deployment_profiles:
+  # Simulation mode
+  - name: "simulation"
+    overrides:
+      interfaces:
+        - name: "robot_state_publisher"
+          endpoint: "tcp://localhost:5557"
+        - name: "head_camera_server"
+          endpoint: "tcp://localhost:5555"
+      services:
+        - name: "mujoco_simulator"
+          command: "python ${GROOT_WBC_ROOT}/gear_sonic/scripts/run_sim_loop.py --enable-image-publish"
+          enabled: true
+
+  # Real robot mode
+  - name: "real_robot"
+    overrides:
+      interfaces:
+        - name: "robot_state_publisher"
+          endpoint: "tcp://192.168.123.164:5557"
+        - name: "head_camera_server"
+          endpoint: "tcp://192.168.123.164:5555"
+
+  # Debug mode (CPU only, verbose logging)
+  - name: "debug"
+    overrides:
+      models:
+        - name: "groot_vla_n16"
+          device: "cpu"
+          runtime: "onnxruntime"
+      monitoring:
+        logging:
+          level: "DEBUG"
+      execution:
+        nodes:
+          - name: "groot_vla_inference"
+            frequency_hz: 1  # Slow for debugging
