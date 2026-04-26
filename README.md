@@ -11,10 +11,19 @@ Define your robot in a single YAML file (hardware, models, gains, controller bin
 | `g1_groot_wbc_unified.yaml` | Decoupled | 15 lower-body + passive arms | Single ONNX |
 | `g1_sonic_wbc.yaml` | SONIC | 29 full-body | Encoder-decoder ONNX |
 
+## Install
+
+```bash
+# Simulation only (MuJoCo + ONNX)
+./install.sh
+
+# Full robot setup (CycloneDDS, Unitree SDK2, GR00T WBC)
+./setup_robot.sh
+```
+
 ## Quick Start
 
 ```bash
-pip install -r requirements.txt
 
 # Launch SONIC WBC in MuJoCo (uses default scene from YAML)
 python scripts/launch_robot.py --robot configs/robots/g1_sonic_wbc.yaml
@@ -65,6 +74,8 @@ rdp-demo/
 │   ├── policy_runners.py     PolicyRunner classes + KeyboardController
 │   └── download_groot_model.py
 ├── models/                   ONNX models (gitignored, download separately)
+├── install.sh                Simulation-only install
+├── setup_robot.sh            Full robot setup (CycloneDDS, Unitree SDK, WBC)
 ├── requirements.txt
 └── pyproject.toml
 ```
