@@ -10,15 +10,15 @@ It handles only simulation concerns:
   - Viewer + keyboard interaction
   - Simulation stepping
 
-The "brain" is a PolicyRunner (from policy_runners.py) that the caller
+The "brain" is a PolicyRunner (from model_runner.py) that the caller
 injects.  The engine calls runner.step(model, data) at the policy rate
 and applies the returned (target, kp, kd) via PD control at sim rate.
 
 Usage:
     from mujoco_engine import run_simulation
-    from policy_runners import SonicPolicyRunner
+    from model_runner import GraphPolicyRunner
 
-    runner = SonicPolicyRunner(encoder_path, decoder_path, cfg)
+    runner = GraphPolicyRunner(graph, bus, config)
     run_simulation("scene.xml", runner, sim_dt=0.002, decimation=10)
 """
 
@@ -144,7 +144,8 @@ def run_simulation(scene_xml, policy_runner, *, sim_dt, decimation,
         stiffness=harness_cfg.get("stiffness", 3000.0),
         damping=harness_cfg.get("damping", 200.0),
     )
-    torso_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, "torso_link")
+    harness_body = harness_cfg.get("body", "torso_link")
+    torso_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, harness_body)
 
     # -- Attach controller to policy runner if present --
     if controller is not None:

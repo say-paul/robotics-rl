@@ -25,45 +25,9 @@ Usage:
 
 import argparse
 import json
-import os
 import sys
 import signal
 from pathlib import Path
-
-import yaml
-
-
-# ---------------------------------------------------------------------------
-# YAML loading with ${VAR} substitution
-# ---------------------------------------------------------------------------
-
-def substitute_variables(obj, variables):
-    """Recursively replace ${VAR_NAME} placeholders in a config tree."""
-    if isinstance(obj, dict):
-        return {k: substitute_variables(v, variables) for k, v in obj.items()}
-    if isinstance(obj, list):
-        return [substitute_variables(item, variables) for item in obj]
-    if isinstance(obj, str):
-        result = obj
-        for name, value in variables.items():
-            result = result.replace(f"${{{name}}}", str(value))
-        return result
-    return obj
-
-
-def load_robot_config(yaml_path):
-    """Load a robot YAML and resolve all ${VAR} references."""
-    path = Path(yaml_path)
-    if not path.exists():
-        print(f"Error: robot config not found: {path}")
-        sys.exit(1)
-
-    with open(path) as f:
-        raw = yaml.safe_load(f)
-
-    variables = raw.get("variables", {})
-    config = substitute_variables(raw, variables)
-    return config
 
 
 # ---------------------------------------------------------------------------
@@ -91,205 +55,33 @@ def detect_world_type(world_path):
 
 
 # ---------------------------------------------------------------------------
-# Config validation
-# ---------------------------------------------------------------------------
-
-def _require(d, key, context="config"):
-    """Get a required key from dict, exit with clear error if missing."""
-    if key not in d:
-        print(f"Error: missing required key '{key}' in {context}")
-        sys.exit(1)
-    return d[key]
-
-
-def validate_model_shapes(config):
-    """
-    Check that model output shapes match downstream input shapes
-    across the execution dataflow declared in the YAML.
-    """
-    models = {m["name"]: m for m in config.get("models", [])}
-    dataflow = (config.get("execution", {}).get("dataflow") or [])
-    if not dataflow:
-        return
-
-    def get_output_shape(model_name, field_name=None):
-        m = models.get(model_name, {})
-        for o in m.get("output", []):
-            if field_name is None or o["name"] == field_name:
-                return o.get("shape")
-        return None
-
-    def get_input_shape(model_name, field_name=None):
-        m = models.get(model_name, {})
-        for i in m.get("input", []):
-            if field_name is None or i["name"] == field_name:
-                return i.get("shape")
-        return None
-
-    print("\nValidating model I/O shapes...")
-    errors = []
-
-    for model_name, m in models.items():
-        for out in m.get("output", []):
-            out_name = out["name"]
-            out_shape = out.get("shape")
-            if out_shape is None:
-                continue
-
-            for downstream_name, dm in models.items():
-                if downstream_name == model_name:
-                    continue
-                for inp in dm.get("input", []):
-                    if inp["name"] == out_name:
-                        in_shape = inp.get("shape")
-                        if in_shape is not None and in_shape != out_shape:
-                            errors.append(
-                                f"  {model_name}.output.{out_name} {out_shape} != "
-                                f"{downstream_name}.input.{inp['name']} {in_shape}"
-                            )
-
-    if errors:
-        print("  Shape mismatches found:")
-        for e in errors:
-            print(e)
-        sys.exit(1)
-    else:
-        print("  All model I/O shapes consistent.")
-
-
-# ---------------------------------------------------------------------------
 # Backend launchers
 # ---------------------------------------------------------------------------
 
-def _detect_wbc_type(config):
-    """Return 'sonic' or 'decoupled' based on configuration.wbc.type."""
-    wbc = config.get("configuration", {}).get("wbc", {})
-    return wbc.get("type", "decoupled")
-
-
-def _build_decoupled_config(config):
-    """Build engine_config dict for the decoupled WBC path."""
-    cfg = _require(config, "configuration")
-    wbc = _require(cfg, "wbc", "configuration")
-
-    required_wbc_keys = [
-        "num_actions", "num_obs", "obs_history_len", "single_obs_dim",
-        "default_angles", "kps", "kds", "arm_kp", "arm_kd",
-        "action_scale", "dof_pos_scale", "dof_vel_scale", "ang_vel_scale",
-        "cmd_scale", "cmd_init", "height_cmd", "rpy_cmd",
-    ]
-    for key in required_wbc_keys:
-        _require(wbc, key, "configuration.wbc")
-
-    engine_config = {
-        **wbc,
-        "simulation_dt": _require(cfg, "simulation_dt", "configuration"),
-        "control_decimation": _require(cfg, "control_decimation", "configuration"),
-    }
-
-    models = config.get("models", [])
-    policy_path = None
-    for m in models:
-        if m.get("type") == "locomotion_policy":
-            paths = m.get("model_paths", {})
-            policy_path = paths.get("balance") or paths.get("walk")
-            break
-
-    if policy_path is None:
-        print("Error: no locomotion_policy model found in robot config")
-        sys.exit(1)
-
-    return engine_config, policy_path
-
-
-def _build_sonic_config(config):
-    """Build engine_config dict for the SONIC WBC path."""
-    cfg = _require(config, "configuration")
-    wbc = _require(cfg, "wbc", "configuration")
-
-    required_wbc_keys = [
-        "num_actions", "default_angles", "kps", "kds",
-        "action_scales", "encoder_obs_dim", "encoder_output_dim",
-        "policy_obs_dim", "history_frames", "history_step",
-        "isaaclab_to_mujoco",
-    ]
-    for key in required_wbc_keys:
-        _require(wbc, key, "configuration.wbc")
-
-    engine_config = {
-        **wbc,
-        "simulation_dt": _require(cfg, "simulation_dt", "configuration"),
-        "control_decimation": _require(cfg, "control_decimation", "configuration"),
-    }
-
-    models = config.get("models", [])
-    encoder_path = None
-    decoder_path = None
-    for m in models:
-        if m.get("type") == "observation_encoder":
-            encoder_path = m.get("model_path")
-        elif m.get("type") == "action_policy":
-            decoder_path = m.get("model_path")
-
-    if encoder_path is None:
-        print("Error: no observation_encoder model found in robot config")
-        sys.exit(1)
-    if decoder_path is None:
-        print("Error: no action_policy model found in robot config")
-        sys.exit(1)
-
-    return engine_config, encoder_path, decoder_path
-
-
 def launch_mujoco(config, world_path, *, controller_type=None):
-    """Launch the MuJoCo simulation with the appropriate policy runner."""
+    """Launch MuJoCo simulation using the YAML execution graph."""
     sys.path.insert(0, str(Path(__file__).parent))
 
     if not Path(world_path).exists():
         print(f"Error: scene file not found: {world_path}")
         sys.exit(1)
 
-    wbc_type = _detect_wbc_type(config)
-    print(f"WBC type: {wbc_type}")
-
-    cfg = _require(config, "configuration")
-    sim_dt = float(_require(cfg, "simulation_dt", "configuration"))
-    decimation = int(_require(cfg, "control_decimation", "configuration"))
-    harness_cfg = cfg.get("wbc", {}).get("harness", {})
-
-    from policy_runners import DecoupledPolicyRunner, SonicPolicyRunner, KeyboardController
+    from model_runner import (
+        build_graph, load_models, GraphPolicyRunner, Scheduler, print_banner,
+    )
     from mujoco_engine import run_simulation
 
-    # Build controller if requested
-    controller = None
-    if controller_type == "keyboard":
-        ctrl_cfg = cfg.get("controller")
-        if ctrl_cfg is None:
-            print("Error: --controller keyboard requested but no controller "
-                  "section found in robot YAML (configuration.controller)")
-            sys.exit(1)
-        controller = KeyboardController(ctrl_cfg)
-        print(f"Controller: keyboard (use arrow keys + number keys)")
+    graph, bus, controller = build_graph(config, controller_type)
 
-    if wbc_type == "sonic":
-        engine_config, encoder_path, decoder_path = _build_sonic_config(config)
+    print("\nLoading models...")
+    load_models(graph)
 
-        for label, p in [("encoder", encoder_path), ("decoder", decoder_path)]:
-            if not Path(p).exists():
-                print(f"Error: {label} ONNX not found: {p}")
-                print(f"  (SONIC ONNX files are stored via Git LFS — run 'git lfs pull' inside GR00T-WholeBodyControl)")
-                sys.exit(1)
+    runner = GraphPolicyRunner(graph, bus, config)
 
-        runner = SonicPolicyRunner(encoder_path, decoder_path, engine_config)
-
-    else:
-        engine_config, policy_path = _build_decoupled_config(config)
-
-        if not Path(policy_path).exists():
-            print(f"Error: policy file not found: {policy_path}")
-            sys.exit(1)
-
-        runner = DecoupledPolicyRunner(policy_path, engine_config)
+    cfg = config.get("configuration", {})
+    sim_dt = float(cfg.get("simulation_dt", 0.002))
+    decimation = int(cfg.get("control_decimation", 10))
+    harness_cfg = cfg.get("harness", {})
 
     run_simulation(
         world_path, runner,
@@ -378,8 +170,8 @@ def build_parser():
         help="Port for shadow connection (default: 5558)",
     )
     parser.add_argument(
-        "--controller", default=None, choices=["keyboard"],
-        help="Activate a controller (e.g. keyboard). "
+        "--controller", default=None,
+        help="Activate a controller source (e.g. keyboard). "
              "If omitted, no runtime controller is active.",
     )
     parser.add_argument(
@@ -393,9 +185,13 @@ def main():
     parser = build_parser()
     args = parser.parse_args()
 
+    sys.path.insert(0, str(Path(__file__).parent))
+
     if args.world and args.shadow_url:
         print("Error: --world and --shadow-url are mutually exclusive")
         sys.exit(1)
+
+    from model_runner import load_robot_config, build_graph, Scheduler, print_banner
 
     config = load_robot_config(args.robot)
 
@@ -415,9 +211,10 @@ def main():
         print(f"World : {world_path}")
     print("=" * 60)
 
-    validate_model_shapes(config)
-
     if args.dry_run:
+        graph, bus, controller = build_graph(config, args.controller)
+        scheduler = Scheduler(graph, bus)
+        print_banner(config, graph, scheduler, controller)
         print("\n[dry-run] Resolved configuration:\n")
         print(json.dumps(config, indent=2, default=str))
         return
