@@ -34,8 +34,16 @@ hardware:
     urdf:
       file: "${GROOT_WBC_ROOT}/gear_sonic/data/robots/g1/g1_29dof.urdf"
       mesh_directory: "${GROOT_WBC_ROOT}/gear_sonic/data/robots/g1/meshes"
-    mujoco_scene:
-      file: "${GROOT_WBC_ROOT}/gear_sonic_deploy/g1/scene_29dof.xml"
+
+    # Default world scenes per simulator.  launch_robot.py picks the right
+    # one based on --world <name>, or the user can override with
+    # --world /path/to/custom_scene.<ext>
+    worlds:
+      mujoco:    "${GROOT_WBC_ROOT}/gear_sonic_deploy/g1/scene_29dof.xml"
+      # Robot USD (import into an Isaac Sim stage with ground plane + lighting)
+      isaac_sim: "${GROOT_WBC_ROOT}/gear_sonic/data/robots/g1/g1_29dof_rev_1_0/g1_29dof_rev_1_0.usd"
+      isaac_lab: "${GROOT_WBC_ROOT}/gear_sonic/data/robots/g1/g1_29dof_rev_1_0/g1_29dof_rev_1_0.usd"
+
 
   sensors:
     - name: "torso_imu"
@@ -392,6 +400,17 @@ interfaces:
     protocol: "zmq"
     endpoint: "tcp://192.168.123.164:5555"
     topic: "rgb_image"
+
+  - name: "dds_control"
+    type: "network"
+    protocol: "dds"
+    middleware: "cyclonedds"
+    domain_id: 0
+    topics:
+      state: "rt/g1/state"
+      command: "rt/g1/command"
+    qos: best_effort
+    unitree_compat: false
 
   - name: "mqtt_mission_cloud"
     type: "network"

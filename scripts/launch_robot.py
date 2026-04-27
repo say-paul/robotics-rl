@@ -69,7 +69,7 @@ def launch_mujoco(config, world_path, *, controller_type=None):
     from model_runner import (
         build_graph, load_models, GraphPolicyRunner, Scheduler, print_banner,
     )
-    from mujoco_engine import run_simulation
+    from engines.mujoco_engine import run_simulation
 
     graph, bus, controller = build_graph(config, controller_type)
 
@@ -100,6 +100,52 @@ def launch_isaac_sim(config, world_path, *, controller_type=None):
     sys.exit(1)
 
 
+def launch_dds(config, *, peer=None, controller_type=None):
+    """Deploy on real hardware or remote sim via DDS.
+
+    Parameters
+    ----------
+    peer : str or None
+        Remote host address for unicast DDS discovery.
+        None = multicast (real robot on local network).
+    """
+    sys.path.insert(0, str(Path(__file__).parent))
+
+    from model_runner import (
+        build_graph, load_models, GraphPolicyRunner,
+    )
+    from engines.dds_engine import DDSEngine
+
+    dds_cfg = _find_dds_interface(config)
+    if dds_cfg is None:
+        print("Error: --deploy requires a 'protocol: dds' entry in the "
+              "robot YAML interfaces section.")
+        sys.exit(1)
+
+    graph, bus, controller = build_graph(config, controller_type)
+
+    print("\nLoading models...")
+    load_models(graph)
+
+    runner = GraphPolicyRunner(graph, bus, config)
+
+    cfg = config.get("configuration", {})
+    sim_dt = float(cfg.get("simulation_dt", 0.002))
+    decimation = int(cfg.get("control_decimation", 10))
+    control_hz = 1.0 / (sim_dt * decimation)
+
+    engine = DDSEngine(dds_cfg, peer=peer, control_hz=control_hz)
+    engine.run(runner, controller=controller)
+
+
+def _find_dds_interface(config):
+    """Find the first interface entry with protocol: dds."""
+    for iface in config.get("interfaces", []):
+        if iface.get("protocol") == "dds":
+            return iface
+    return None
+
+
 def launch_shadow(config, shadow_url, shadow_port):
     """Placeholder for shadow / digital-twin mode."""
     print(f"Shadow mode not yet implemented.")
@@ -118,25 +164,72 @@ BACKENDS = {
 # Resolve the world path
 # ---------------------------------------------------------------------------
 
-def resolve_world(args, config):
+def _resolve_default_world(config, world_type=None):
+    """Find a default world path from the robot YAML.
+
+    Looks in ``hardware.description.worlds`` (new generic format) first,
+    then falls back to ``hardware.description.mujoco_scene.file`` for
+    backward compatibility.
+
+    Parameters
+    ----------
+    world_type : str or None
+        Preferred simulator (e.g. "mujoco", "isaac_sim").  If None,
+        returns the first non-empty entry found.
     """
-    Determine the world path from CLI args or the robot YAML's default_world.
+    hw = config.get("hardware", {}).get("description", {})
+    worlds = hw.get("worlds", {})
+
+    if world_type:
+        path = worlds.get(world_type, "")
+        return path if path else None
+
+    if worlds:
+        for wtype in ("mujoco", "isaac_sim", "isaac_lab", "genesis", "o3de"):
+            path = worlds.get(wtype, "")
+            if path:
+                return path
+
+    # Backward compat: old mujoco_scene.file key
+    scene = hw.get("mujoco_scene", {}).get("file")
+    if scene:
+        return scene
+
+    return None
+
+
+def resolve_world(args, config):
+    """Determine the world path from CLI args or the robot YAML's defaults.
+
+    ``--world`` accepts either:
+      - A file path:  ``--world /path/to/scene.xml``
+      - A key name:   ``--world mujoco``  (looked up in YAML ``worlds`` dict)
+
     Returns (world_path, world_type) or (None, "shadow").
     """
     if args.shadow_url:
         return None, "shadow"
 
-    world_path = args.world
+    world_arg = args.world
 
-    if world_path is None:
-        hw = config.get("hardware", {}).get("description", {})
-        scene = hw.get("mujoco_scene", {}).get("file")
-        if scene:
-            world_path = scene
+    if world_arg is None:
+        world_path = _resolve_default_world(config)
+        if world_path:
             print(f"Using default world from robot YAML: {world_path}")
         else:
-            print("Error: no --world provided and no default_world / mujoco_scene in robot YAML")
+            print("Error: no --world provided and no worlds / mujoco_scene "
+                  "in robot YAML")
             sys.exit(1)
+    else:
+        # Check if the arg matches a key in the worlds dict
+        hw = config.get("hardware", {}).get("description", {})
+        worlds = hw.get("worlds", {})
+        resolved = worlds.get(world_arg, "")
+        if resolved:
+            world_path = resolved
+            print(f"Using {world_arg} world from robot YAML: {world_path}")
+        else:
+            world_path = world_arg
 
     world_type = detect_world_type(world_path)
     return world_path, world_type
@@ -158,8 +251,8 @@ def build_parser():
     )
     parser.add_argument(
         "--world", default=None,
-        help="Path to world/scene file (.xml for MuJoCo, .usd for Isaac Sim). "
-             "Omit to use the default from the robot YAML.",
+        help="Scene file path or a key from the robot YAML worlds dict "
+             "(e.g. mujoco, isaac_sim). Omit to use the first available default.",
     )
     parser.add_argument(
         "--shadow-url", default=None,
@@ -168,6 +261,13 @@ def build_parser():
     parser.add_argument(
         "--shadow-port", type=int, default=5558,
         help="Port for shadow connection (default: 5558)",
+    )
+    parser.add_argument(
+        "--deploy", nargs="?", const=True, default=None, metavar="HOST",
+        help="Deploy via DDS (headless, no simulated world). "
+             "Without a host: real robot on local DDS (multicast discovery). "
+             "With a host: remote sim (Isaac Sim, O3DE, etc.) at that address. "
+             "Example: --deploy 192.168.1.100",
     )
     parser.add_argument(
         "--controller", default=None,
@@ -187,8 +287,11 @@ def main():
 
     sys.path.insert(0, str(Path(__file__).parent))
 
-    if args.world and args.shadow_url:
-        print("Error: --world and --shadow-url are mutually exclusive")
+    exclusive_count = sum([
+        bool(args.world), bool(args.shadow_url), args.deploy is not None,
+    ])
+    if exclusive_count > 1:
+        print("Error: --world, --shadow-url, and --deploy are mutually exclusive")
         sys.exit(1)
 
     from model_runner import load_robot_config, build_graph, Scheduler, print_banner
@@ -201,15 +304,27 @@ def main():
     print(f"Desc  : {meta.get('description', '')}")
     print("=" * 60)
 
-    world_path, world_type = resolve_world(args, config)
-
-    if world_type == "shadow":
-        print(f"Mode  : shadow (digital twin)")
-        print(f"Source: tcp://{args.shadow_url}:{args.shadow_port}")
+    if args.deploy is not None:
+        peer = args.deploy if isinstance(args.deploy, str) else None
+        if peer:
+            print(f"Mode  : deploy (DDS -> {peer})")
+        else:
+            print(f"Mode  : deploy (DDS, local robot)")
+        dds_cfg = _find_dds_interface(config)
+        if dds_cfg:
+            topics = dds_cfg.get("topics", {})
+            print(f"DDS   : domain {dds_cfg.get('domain_id', 0)}, "
+                  f"state={topics.get('state')}, cmd={topics.get('command')}")
+        print("=" * 60)
     else:
-        print(f"Mode  : {world_type}")
-        print(f"World : {world_path}")
-    print("=" * 60)
+        world_path, world_type = resolve_world(args, config)
+        if world_type == "shadow":
+            print(f"Mode  : shadow (digital twin)")
+            print(f"Source: tcp://{args.shadow_url}:{args.shadow_port}")
+        else:
+            print(f"Mode  : {world_type}")
+            print(f"World : {world_path}")
+        print("=" * 60)
 
     if args.dry_run:
         graph, bus, controller = build_graph(config, args.controller)
@@ -221,7 +336,10 @@ def main():
 
     signal.signal(signal.SIGINT, lambda *_: sys.exit(0))
 
-    if world_type == "shadow":
+    if args.deploy is not None:
+        peer = args.deploy if isinstance(args.deploy, str) else None
+        launch_dds(config, peer=peer, controller_type=args.controller)
+    elif world_type == "shadow":
         launch_shadow(config, args.shadow_url, args.shadow_port)
     else:
         backend_fn = BACKENDS.get(world_type)

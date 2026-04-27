@@ -2,7 +2,7 @@
 
 YAML-driven robot deployment for Unitree G1 with GR00T VLA and Whole Body Control.
 
-Define your robot in a single YAML file (hardware, models, gains, controller bindings) and launch it in MuJoCo simulation with one command.
+Define your robot in a single YAML file (hardware, models, gains, controller bindings) and run it in MuJoCo, Isaac Sim, or on real hardware — same config, same models, different `--world` or `--deploy` flag.
 
 ## Supported Configurations
 
@@ -23,21 +23,75 @@ Define your robot in a single YAML file (hardware, models, gains, controller bin
 
 ## Quick Start
 
-```bash
+### Local MuJoCo Simulation
 
-# Launch SONIC WBC in MuJoCo (uses default scene from YAML)
+```bash
+# Uses default scene from robot YAML
 python scripts/launch_robot.py --robot configs/robots/g1_sonic_wbc.yaml
 
-# Launch with keyboard controller
+# With keyboard controller
 python scripts/launch_robot.py --robot configs/robots/g1_sonic_wbc.yaml --controller keyboard
 
-# Launch decoupled WBC with custom scene
-python scripts/launch_robot.py \
-    --robot configs/robots/g1_groot_wbc_unified.yaml \
-    --world /path/to/scene.xml
+# Pick a specific simulator world from YAML
+python scripts/launch_robot.py --robot configs/robots/g1_sonic_wbc.yaml --world mujoco
+
+# Custom scene file
+python scripts/launch_robot.py --robot configs/robots/g1_sonic_wbc.yaml --world /path/to/scene.xml
 
 # Dry run (print resolved config, don't launch)
 python scripts/launch_robot.py --robot configs/robots/g1_sonic_wbc.yaml --dry-run
+```
+
+### Deploy on Real Robot (DDS)
+
+```bash
+# Real robot — multicast discovery on local network
+python scripts/launch_robot.py --robot configs/robots/g1_sonic_wbc.yaml --deploy
+
+# With keyboard controller for manual override
+python scripts/launch_robot.py --robot configs/robots/g1_sonic_wbc.yaml --deploy --controller keyboard
+```
+
+The policy runs headless, communicating with the robot over Cyclone DDS.
+The robot's onboard firmware handles PD control.
+
+### Remote Simulation (Isaac Sim, O3DE, etc.)
+
+Run the simulator on a remote machine, and the policy locally:
+
+**On the remote machine** (inside Isaac Sim's Python env):
+```bash
+./python.sh isaac_sim/dds_bridge.py \
+    --usd /path/to/g1_scene.usd \
+    --robot-prim /World/G1 \
+    --domain-id 0
+```
+
+> **`--robot-prim`** is the USD scene-graph path to the robot articulation
+> inside the Isaac Sim stage. The robot USD assets (e.g.
+> `g1_29dof_rev_1_0.usd`) are included in the GR00T WBC repo, which is
+> downloaded by `./install.sh`. Import one into an Isaac Sim stage with a
+> ground plane and lighting, then pass the prim path where it was placed.
+
+**On your local machine** (runs the policy):
+```bash
+python scripts/launch_robot.py \
+    --robot configs/robots/g1_sonic_wbc.yaml \
+    --deploy 192.168.1.100
+```
+
+The `--deploy HOST` flag configures Cyclone DDS unicast discovery to reach
+the remote machine directly (works across subnets and VPNs).
+
+DDS topic names and domain ID come from the `interfaces` section of the robot YAML:
+```yaml
+interfaces:
+  - name: "dds_control"
+    protocol: "dds"
+    domain_id: 0
+    topics:
+      state: "rt/g1/state"
+      command: "rt/g1/command"
 ```
 
 ## In-Simulation Controls
@@ -56,8 +110,11 @@ With `--controller keyboard` (SONIC only):
 | Key | Action |
 |-----|--------|
 | Arrow keys | Move forward/back/left/right |
-| 1-9 | Switch locomotion style (walk, run, stealth, injured, zombie, ...) |
 | 0 | Stop (IDLE) |
+| 1 | Slow walk |
+| 2 | Walk |
+| 3 | Run |
+| 4-6 | Other styles (stealth, zombie, happy dance) |
 
 When the keyboard controller is active, harness keys move to H/J/K.
 
@@ -65,35 +122,58 @@ When the keyboard controller is active, harness keys move to H/J/K.
 
 ```
 rdp-demo/
-├── configs/robots/           Robot YAML definitions
+├── configs/robots/             Robot YAML definitions
 │   ├── g1_groot_wbc_unified.yaml   Decoupled WBC (15-DOF)
 │   └── g1_sonic_wbc.yaml           SONIC WBC (29-DOF)
 ├── scripts/
-│   ├── launch_robot.py       CLI orchestrator
-│   ├── mujoco_engine.py      MuJoCo simulation loop (policy-agnostic)
-│   ├── policy_runners.py     PolicyRunner classes + KeyboardController
-│   └── download_groot_model.py
-├── models/                   ONNX models (gitignored, download separately)
-├── install.sh                Simulation-only install
-├── setup_robot.sh            Full robot setup (CycloneDDS, Unitree SDK, WBC)
+│   ├── launch_robot.py         CLI entry point (--world / --deploy / --shadow-url)
+│   ├── model_runner.py         YAML graph builder, SignalBus, PolicyRunner, Scheduler
+│   ├── engines/
+│   │   ├── __init__.py         RobotState dataclass + SimulationEngine ABC
+│   │   ├── mujoco_engine.py    Local MuJoCo simulation (harness, PD, viewer)
+│   │   ├── dds_engine.py       DDS transport (real robot / remote sim)
+│   │   └── dds_types.py        Cyclone DDS message definitions
+│   └── handlers/
+│       ├── sonic_wbc.py        SONIC WBC handler (joint remap, history, gains)
+│       ├── sonic_encoder.py    Observation encoder handler
+│       ├── sonic_decoder.py    Policy decoder handler
+│       └── sonic_planner.py    Local motion planner handler
+├── isaac_sim/
+│   └── dds_bridge.py           Standalone Isaac Sim DDS bridge (remote machine)
+├── models/                     ONNX models (gitignored, download separately)
+├── install.sh                  Simulation-only install
+├── setup_robot.sh              Full robot setup (CycloneDDS, Unitree SDK, WBC)
 ├── requirements.txt
 └── pyproject.toml
 ```
 
 ## Architecture
 
-The launcher reads the robot YAML, detects the WBC type, builds the appropriate `PolicyRunner`, and hands it to the MuJoCo engine:
-
 ```
-launch_robot.py  →  reads YAML  →  builds PolicyRunner  →  mujoco_engine.run_simulation()
-                                         │
-                              ┌──────────┴──────────┐
-                              │                     │
-                    DecoupledPolicyRunner    SonicPolicyRunner
-                    (1 ONNX, 15 actions)    (encoder+decoder, 29 actions)
+launch_robot.py
+  --world mujoco    →  MuJoCoEngine  →  local viewer + PD control
+  --world isaac_sim →  (placeholder)
+  --deploy          →  DDSEngine     →  headless, DDS I/O to real robot
+  --deploy HOST     →  DDSEngine     →  headless, DDS unicast to remote sim
 ```
 
-The engine is completely agnostic to the policy. It handles the MuJoCo scene, harness, PD control loop, and viewer. The runner handles ONNX loading, observation building, inference, and action mapping.
+The engine abstraction (`RobotState`) decouples the policy from the physics backend:
+
+```
+                    ┌─────────────────────────────┐
+                    │       GraphPolicyRunner      │
+                    │  (WBC handler + ONNX graph)  │
+                    └──────────┬──────────────────┘
+                               │ RobotState
+              ┌────────────────┼────────────────┐
+              │                │                │
+        MuJoCoEngine     DDSEngine         (future)
+        (local sim)    (real robot /     Isaac Sim local,
+                       remote sim)       Genesis, O3DE
+```
+
+All engines pass the same `RobotState(qpos, qvel, time)` to the policy.
+The WBC handler, ONNX models, and controller work identically regardless of backend.
 
 ## Robot YAML Format
 
@@ -101,10 +181,11 @@ Each robot YAML is self-contained with all parameters inlined:
 
 - **variables** — path substitution (`${VAR}`)
 - **metadata** — name, version, description
-- **hardware** — URDF, MuJoCo scene, sensors, actuators, joint names
-- **models** — ONNX model paths, I/O shapes, dtypes
-- **execution** — dataflow graph, frequencies, threading
+- **hardware** — URDF, world scenes per simulator, sensors, actuators
+- **models** — ONNX model paths, runtime, precision
+- **execution** — dataflow DAG, node frequencies, handlers
 - **configuration** — WBC params (gains, scales, joint mappings, controller bindings)
+- **interfaces** — DDS, ZMQ, gRPC, MQTT endpoints
 - **deployment_profiles** — overrides for sim vs real
 
 ## Requirements
@@ -114,3 +195,4 @@ Each robot YAML is self-contained with all parameters inlined:
 - onnxruntime
 - numpy
 - PyYAML
+- cyclonedds (only for `--deploy` mode)

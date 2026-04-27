@@ -45,8 +45,13 @@ class SonicWBCHandler:
     Reads all parameters from configuration.wbc in the robot YAML.
     """
 
-    def setup(self, bus, config, model, data):
-        """Initialize from YAML config, set initial qpos, return n_actuated."""
+    def setup(self, bus, config, state):
+        """Initialize from YAML config, set initial qpos, return n_actuated.
+
+        ``state`` is a RobotState whose qpos/qvel may alias the engine's
+        internal arrays (zero-copy for MuJoCo).  The engine handles forward
+        kinematics after this method returns.
+        """
         wbc = config.get("configuration", {}).get("wbc", {})
 
         self._num_actions = int(wbc.get("num_actions", 29))
@@ -54,23 +59,20 @@ class SonicWBCHandler:
         self._kps = np.array(wbc.get("kps", [100.0] * self._num_actions), dtype=np.float32)
         self._kds = np.array(wbc.get("kds", [5.0] * self._num_actions), dtype=np.float32)
         self._action_scales = np.array(wbc.get("action_scales", [1.0] * self._num_actions), dtype=np.float32)
-        self._obs_scales = wbc.get("obs_scales", {})
         self._encoder_mode = int(wbc.get("encoder_mode", 0))
         self._history_frames = int(wbc.get("history_frames", 10))
 
         self._mj2il = wbc.get("isaaclab_to_mujoco", list(range(self._num_actions)))
         self._il2mj = wbc.get("mujoco_to_isaaclab", list(range(self._num_actions)))
 
-        n_joints = data.qpos.shape[0] - 7
+        n_joints = state.qpos.shape[0] - 7
         self._n_joints = n_joints
         self._n_actuated = min(n_joints, self._num_actions)
 
         for mj_i in range(self._n_actuated):
-            data.qpos[7 + mj_i] = self._default_angles[mj_i]
+            state.qpos[7 + mj_i] = self._default_angles[mj_i]
 
-        import mujoco as mj
-        mj.mj_forward(model, data)
-        self._standing_height = data.qpos[2]
+        self._standing_height = state.qpos[2]
 
         self._target = self._default_angles.copy()
 
@@ -84,35 +86,49 @@ class SonicWBCHandler:
         self._last_action_il = np.zeros(na, dtype=np.float32)
 
         self._qpos_history = np.zeros((4, 36), dtype=np.float32)
-        initial_qpos = data.qpos[:min(36, len(data.qpos))].astype(np.float32)
+        initial_qpos = state.qpos[:min(36, len(state.qpos))].astype(np.float32)
         for i in range(4):
             self._qpos_history[i, :len(initial_qpos)] = initial_qpos
 
+        control_hz = float(config.get("control_frequency_hz", 50))
+        planner_traj_hz = 30.0
+        self._ref_frame = 0.0
+        self._ref_frame_advance = planner_traj_hz / control_hz
+        self._last_traj_id = None
+        self._held_traj = None
+        self._min_frames_before_replan = 18
+
+        self._blend_ticks_total = 8
+        self._blend_tick = self._blend_ticks_total
+        self._blend_old_jpos = None
+        self._blend_old_jvel = None
+        self._blend_old_rz = None
+        self._blend_old_orn = None
+
         bus.put("standing_height", np.array([self._standing_height], dtype=np.float32))
         bus.put("encoder_mode", np.array([self._encoder_mode], dtype=np.float32))
-        bus.put("base_quaternion", data.qpos[3:7].copy().astype(np.float64))
+        bus.put("base_quaternion", state.qpos[3:7].copy().astype(np.float64))
         bus.put("context_mujoco_qpos", self._qpos_history.copy())
 
         return self._n_actuated
 
-    def pre_step(self, bus, model, data):
-        """Read MuJoCo state, compute derived quantities, update history, write to bus."""
+    def pre_step(self, bus, state):
+        """Read robot state, compute derived quantities, update history, write to bus."""
         nj = self._n_joints
         na = self._num_actions
-        qj = data.qpos[7:7 + nj].copy()
-        dqj = data.qvel[6:6 + nj].copy()
-        quat = data.qpos[3:7].copy()
-        omega = data.qvel[3:6].copy()
+        qj = state.qpos[7:7 + nj].copy()
+        dqj = state.qvel[6:6 + nj].copy()
+        quat = state.qpos[3:7].copy()
+        omega = state.qvel[3:6].copy()
         gravity = get_gravity_orientation(quat)
 
-        sc = self._obs_scales
         qj_il = np.zeros(na, dtype=np.float32)
         dqj_il = np.zeros(na, dtype=np.float32)
-        omega_il = omega * sc.get("base_ang_vel", 0.25)
+        omega_il = omega.astype(np.float32)
         for mj_i in range(min(nj, na)):
             il_i = self._mj2il[mj_i]
-            qj_il[il_i] = (qj[mj_i] - self._default_angles[mj_i]) * sc.get("dof_pos", 1.0)
-            dqj_il[il_i] = dqj[mj_i] * sc.get("dof_vel", 0.05)
+            qj_il[il_i] = qj[mj_i] - self._default_angles[mj_i]
+            dqj_il[il_i] = dqj[mj_i]
 
         self._ang_vel_hist = np.roll(self._ang_vel_hist, -1, axis=0)
         self._jpos_hist = np.roll(self._jpos_hist, -1, axis=0)
@@ -126,7 +142,7 @@ class SonicWBCHandler:
         self._gravity_hist[-1] = gravity
 
         self._qpos_history = np.roll(self._qpos_history, -1, axis=0)
-        frame = data.qpos[:min(36, len(data.qpos))].astype(np.float32)
+        frame = state.qpos[:min(36, len(state.qpos))].astype(np.float32)
         self._qpos_history[-1, :] = 0.0
         self._qpos_history[-1, :len(frame)] = frame
         bus.put("context_mujoco_qpos", self._qpos_history.copy())
@@ -150,13 +166,21 @@ class SonicWBCHandler:
     # Number of lower-body joints in IsaacLab order (6 left leg + 6 right leg)
     _N_LOWER_BODY = 12
 
-    # Planner output is 30 Hz; encoder needs 10 frames at "step 5" = every
-    # 100 ms.  At 30 Hz that's every 3 frames.
-    _REF_SAMPLE_INDICES_30HZ = [0, 3, 6, 9, 12, 15, 18, 21, 24, 27]
+    # Encoder needs 10 look-ahead frames at "step 5" (50 Hz) = step 3 at 30 Hz.
+    _REF_STEP_30HZ = 3
+    _REF_N_SAMPLES = 10
 
     def _extract_reference_trajectory(self, bus):
-        """Read the planner's reference_trajectory from the bus and write
+        """Read the planner's reference_trajectory from the bus, advance a
+        frame cursor (matching the C++ ``current_frame_`` logic), and write
         per-frame reference signals that the encoder handler consumes.
+
+        Frame advancement:
+          The planner trajectory is at 30 Hz.  Each 50 Hz control tick we
+          advance the cursor by 30/50 = 0.6 frames.  When a **new** planner
+          trajectory arrives (detected via array identity), the cursor resets
+          to 0 so the 10-frame observation window starts from the new plan's
+          beginning (mirrors the C++ reset-on-blend behaviour).
 
         Writes (when trajectory available):
           ref_joint_positions_10f  : [10, 29] IsaacLab order
@@ -166,11 +190,30 @@ class SonicWBCHandler:
           ref_root_z               : [1]      current frame root z
           ref_orientation          : [4]      current frame quat
         """
-        traj = bus.get("reference_trajectory")
-        if traj is None:
+        bus_traj = bus.get("reference_trajectory")
+        if bus_traj is None:
             return
 
-        traj = np.asarray(traj, dtype=np.float32)
+        bus_traj_id = id(bus_traj)
+        is_new_on_bus = bus_traj_id != self._last_traj_id
+
+        if self._held_traj is None:
+            self._held_traj = np.asarray(bus_traj, dtype=np.float32).copy()
+            self._last_traj_id = bus_traj_id
+            self._ref_frame = 0.0
+        elif is_new_on_bus and self._ref_frame >= self._min_frames_before_replan:
+            if self._blend_old_jpos is not None:
+                self._blend_tick = 0
+            self._held_traj = np.asarray(bus_traj, dtype=np.float32).copy()
+            self._last_traj_id = bus_traj_id
+            self._ref_frame = 0.0
+        elif is_new_on_bus:
+            self._last_traj_id = bus_traj_id
+            self._ref_frame += self._ref_frame_advance
+        else:
+            self._ref_frame += self._ref_frame_advance
+
+        traj = self._held_traj
         if traj.ndim == 3:
             traj = traj[0]  # [N, 36]
         n_frames = traj.shape[0]
@@ -183,16 +226,19 @@ class SonicWBCHandler:
         else:
             n_valid = n_frames
 
+        base_frame = int(self._ref_frame)
+
         na = self._num_actions
         il2mj = self._il2mj
-        n_samples = len(self._REF_SAMPLE_INDICES_30HZ)
+        step = self._REF_STEP_30HZ
+        n_samples = self._REF_N_SAMPLES
 
         jpos_il = np.zeros((n_samples, na), dtype=np.float32)
         root_z = np.zeros(n_samples, dtype=np.float32)
         orientations = np.zeros((n_samples, 4), dtype=np.float64)
 
-        for si, fi_30 in enumerate(self._REF_SAMPLE_INDICES_30HZ):
-            fi = min(fi_30, n_valid - 1)
+        for si in range(n_samples):
+            fi = min(base_frame + si * step, n_valid - 1)
             frame = traj[fi]
 
             root_z[si] = frame[2]
@@ -205,9 +251,22 @@ class SonicWBCHandler:
         jvel_il = np.zeros_like(jpos_il)
         dt_30 = 1.0 / 30.0
         for si in range(n_samples - 1):
-            jvel_il[si] = (jpos_il[si + 1] - jpos_il[si]) / (dt_30 * 3)
+            jvel_il[si] = (jpos_il[si + 1] - jpos_il[si]) / (dt_30 * step)
         if n_samples > 1:
             jvel_il[-1] = jvel_il[-2]
+
+        if self._blend_tick < self._blend_ticks_total:
+            alpha = (self._blend_tick + 1) / self._blend_ticks_total
+            jpos_il = alpha * jpos_il + (1.0 - alpha) * self._blend_old_jpos
+            jvel_il = alpha * jvel_il + (1.0 - alpha) * self._blend_old_jvel
+            root_z = alpha * root_z + (1.0 - alpha) * self._blend_old_rz
+            orientations = alpha * orientations + (1.0 - alpha) * self._blend_old_orn
+            self._blend_tick += 1
+
+        self._blend_old_jpos = jpos_il.copy()
+        self._blend_old_jvel = jvel_il.copy()
+        self._blend_old_rz = root_z.copy()
+        self._blend_old_orn = orientations.copy()
 
         bus.put("ref_joint_positions_10f", jpos_il)
         bus.put("ref_joint_velocities_10f", jvel_il)
@@ -215,6 +274,16 @@ class SonicWBCHandler:
         bus.put("ref_orientation_10f", orientations.astype(np.float64))
         bus.put("ref_root_z", np.array([root_z[0]], dtype=np.float32))
         bus.put("ref_orientation", orientations[0].astype(np.float64))
+
+    _diag_count = 0
+    _diag_limit = 30
+    _diag_walking = False
+    _diag_has_ref = False
+
+    def reset_diag(self):
+        self._diag_count = 0
+        self._diag_walking = False
+        self._diag_has_ref = False
 
     def post_step(self, bus):
         """Read action from bus, remap IsaacLab->MuJoCo, return (target, kps, kds)."""
@@ -226,10 +295,38 @@ class SonicWBCHandler:
             self._target = self._default_angles.copy()
             for mj_i in range(self._n_actuated):
                 il_i = self._mj2il[mj_i]
-                self._target[mj_i] = (
-                    self._default_angles[mj_i]
-                    + action_il[il_i] * self._action_scales[mj_i]
-                )
+                delta = action_il[il_i] * self._action_scales[mj_i]
+                self._target[mj_i] = self._default_angles[mj_i] + delta
+
+        mode = bus.get("mode")
+        ref = bus.get("reference_trajectory")
+        ref_jpos = bus.get("ref_joint_positions_10f")
+        enc = bus.get("encoded_tokens")
+        m = int(mode.flat[0]) if mode is not None else 0
+
+        if m != 0 and not self._diag_walking:
+            self._diag_walking = True
+            print(f"\n[DIAG] Mode changed (mode={m}), waiting for ref_jpos...")
+
+        if self._diag_walking and not self._diag_has_ref and ref_jpos is not None:
+            self._diag_has_ref = True
+            self._diag_count = 0
+            print(f"[DIAG] === Walking ref active, capturing {self._diag_limit} ticks ===")
+
+        if self._diag_walking and self._diag_has_ref and self._diag_count < self._diag_limit:
+            self._diag_count += 1
+            a_std = float(action_raw.std()) if action_raw is not None else 0
+            a_max = float(np.abs(action_raw).max()) if action_raw is not None else 0
+            t_delta = float(np.abs(self._target[:self._n_actuated] - self._default_angles[:self._n_actuated]).max())
+            rf = self._ref_frame
+            print(f"[DIAG] #{self._diag_count:2d} mode={m} "
+                  f"ref_jpos={'yes' if ref_jpos is not None else 'NO'} "
+                  f"enc={'yes' if enc is not None else 'NO'} "
+                  f"rf={rf:.1f} "
+                  f"a_std={a_std:.3f} a_max={a_max:.3f} "
+                  f"tgt_delta={t_delta:.4f}")
+            if self._diag_count == self._diag_limit:
+                print("[DIAG] (suppressing further output)")
 
         return (self._target[:self._n_actuated],
                 self._kps[:self._n_actuated],

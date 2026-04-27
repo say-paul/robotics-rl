@@ -31,14 +31,15 @@ def build_policy_obs(bus, model_cfg, node_cfg):
         - "gravity_hist":   shape [30], flattened (10 frames × 3)
 
     Returns:
-        dict mapping the ONNX input name to a [1, 994] float32 array,
-        or None if encoded_tokens is missing.
+        dict mapping the ONNX input name to a [1, 994] float32 array.
+        Uses zero tokens when encoded_tokens is missing (idle/no reference),
+        matching the C++ reference which keeps token_state at zeros.
     """
     token = bus.get("encoded_tokens")
     if token is None:
-        return None
-
-    token = token.flatten()
+        token = np.zeros(64, dtype=np.float32)
+    else:
+        token = token.flatten()
 
     ang_vel = bus.get("ang_vel_hist")
     jpos = bus.get("jpos_hist")

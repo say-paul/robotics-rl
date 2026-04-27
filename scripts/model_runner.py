@@ -212,9 +212,10 @@ def load_handler(dotted_path: str):
 # ---------------------------------------------------------------------------
 
 class PolicyRunner(ABC):
-    """Interface between the MuJoCo engine and a specific policy architecture.
+    """Interface between a simulation engine and a specific policy architecture.
 
-    The engine calls setup() once, then step() every decimation sim-steps.
+    The engine calls setup() once with the initial RobotState, then step()
+    every decimation sim-steps with the current state.
     """
 
     @property
@@ -223,14 +224,20 @@ class PolicyRunner(ABC):
         """Human-readable name for status prints."""
 
     @abstractmethod
-    def setup(self, model, data):
-        """Called once after MuJoCo model/data are created.
-        Must return n_actuated (int)."""
+    def setup(self, state):
+        """Called once with the initial RobotState.
+
+        May modify state.qpos to set a default pose (the engine handles
+        forward kinematics afterward).  Must return n_actuated (int).
+        """
 
     @abstractmethod
-    def step(self, model, data):
+    def step(self, state):
         """Called every decimation sim-steps when policy is active.
-        Returns (target_pos, kps, kds) as np.arrays of length n_actuated."""
+
+        ``state`` is the current RobotState.
+        Returns (target_pos, kps, kds) as np.arrays of length n_actuated.
+        """
 
     def set_controller(self, controller):
         """Attach a runtime controller."""
@@ -602,6 +609,57 @@ class ControllerNode(ExecutionNode):
             bus.put(sig_name, value)
 
 
+class ScriptNode(ExecutionNode):
+    """A pure-Python DAG node — no ONNX model, just a handler function.
+
+    The handler signature is:
+        def my_handler(bus, config, node_cfg, input_names, output_names)
+            -> dict[str, np.ndarray]
+
+    It reads whatever it needs from the bus, runs arbitrary Python logic
+    (sensor math, thresholds, state machines, …), and returns a dict of
+    signal_name → numpy array.  The returned signals are written to the bus.
+
+    YAML usage:
+        nodes:
+          - name: "collision_guard"
+            type: "script"
+            handler: "handlers.collision_avoidance.check_obstacle"
+            frequency_hz: 30
+            config_key: "collision_avoidance"   # optional, section in configuration
+    """
+
+    def __init__(self, name: str, node_cfg: dict, config: dict):
+        super().__init__(name, node_cfg.get("frequency_hz", 50))
+        handler_path = node_cfg.get("handler")
+        if not handler_path:
+            raise ValueError(f"ScriptNode '{name}' requires a 'handler' field "
+                             f"pointing to a Python function (module.func)")
+        self._handler = load_handler(handler_path)
+        self._node_cfg = node_cfg
+        config_key = node_cfg.get("config_key")
+        self._section_cfg = (config.get("configuration", {}).get(config_key, {})
+                             if config_key else {})
+
+    def tick(self, bus: SignalBus, input_names: list[str],
+             output_names: list[str]) -> None:
+        try:
+            result = self._handler(
+                bus, self._section_cfg, self._node_cfg,
+                input_names, output_names,
+            )
+        except Exception as e:
+            print(f"  Warning: script node '{self.name}' raised "
+                  f"{type(e).__name__}: {e}")
+            return
+        if result and isinstance(result, dict):
+            for sig_name, value in result.items():
+                if isinstance(value, np.ndarray):
+                    bus.put(sig_name, value)
+                else:
+                    bus.put(sig_name, np.asarray(value))
+
+
 class ClassicalControlNode(ExecutionNode):
     """Placeholder for non-ONNX nodes like PD control.  In the generic
     runner these are no-ops — the actual PD math lives in the simulation
@@ -805,6 +863,10 @@ def build_graph(config: dict, controller_type: str | None = None) -> tuple[
             graph.add_node(ControllerNode(name, source, nc))
             continue
 
+        if node_type == "script":
+            graph.add_node(ScriptNode(name, nc, config))
+            continue
+
         model_name = nc.get("model", name)
         model_cfg = models_by_name.get(model_name, {})
         model_type = model_cfg.get("type", "")
@@ -865,9 +927,18 @@ class GraphPolicyRunner(PolicyRunner):
     WBC handler class specified in the YAML (configuration.wbc.handler).
 
     The handler provides three methods:
-      - setup(bus, config, model, data) -> n_actuated
-      - pre_step(bus, model, data)
+      - setup(bus, config, state: RobotState) -> n_actuated
+      - pre_step(bus, state: RobotState)
       - post_step(bus) -> (target_pos, kps, kds)
+
+    Multi-rate scheduling
+    ---------------------
+    ``step()`` is called by the engine at the control rate (e.g. 50 Hz).
+    Each node declares its own ``frequency_hz`` in the YAML.  Nodes slower
+    than the control rate are gated: a 5 Hz node only ticks every 10th
+    call when the control rate is 50 Hz.  Nodes at or above the control
+    rate tick every call.  Between ticks, a node's last outputs remain on
+    the bus (hold-last behaviour).
     """
 
     def __init__(self, graph: ExecutionGraph, bus: SignalBus, config: dict):
@@ -876,6 +947,21 @@ class GraphPolicyRunner(PolicyRunner):
         self._config = config
         self._controller: ControllerSource | None = None
         self._wbc_handler = self._load_wbc_handler(config)
+
+        cfg = config.get("configuration", {})
+        sim_dt = float(cfg.get("simulation_dt", 0.002))
+        decimation = int(cfg.get("control_decimation", 10))
+        self._control_hz = 1.0 / (sim_dt * decimation)
+
+        self._divisors: dict[str, int] = {}
+        for name, node in graph.nodes.items():
+            node_hz = max(node.frequency_hz, 1)
+            if node_hz >= self._control_hz:
+                self._divisors[name] = 1
+            else:
+                self._divisors[name] = max(round(self._control_hz / node_hz), 1)
+
+        self._tick = 0
 
     def _load_wbc_handler(self, config):
         handler_path = (config.get("configuration", {})
@@ -896,17 +982,21 @@ class GraphPolicyRunner(PolicyRunner):
     def set_controller(self, controller):
         self._controller = controller
 
-    def setup(self, model, data):
-        return self._wbc_handler.setup(self._bus, self._config, model, data)
+    def setup(self, state):
+        return self._wbc_handler.setup(self._bus, self._config, state)
 
-    def step(self, model, data):
-        self._wbc_handler.pre_step(self._bus, model, data)
+    def step(self, state):
+        self._wbc_handler.pre_step(self._bus, state)
 
         if self._controller is not None and self._controller.enabled:
             for sig_name, value in self._controller.poll().items():
                 self._bus.put(sig_name, value)
 
         for node_name in self._graph.schedule:
+            divisor = self._divisors.get(node_name, 1)
+            if self._tick % divisor != 0:
+                continue
+
             node = self._graph.nodes[node_name]
             inputs = self._graph.get_inputs(node_name)
             outputs = self._graph.get_outputs(node_name)
@@ -916,13 +1006,25 @@ class GraphPolicyRunner(PolicyRunner):
                 print(f"  Warning: node '{node_name}' raised "
                       f"{type(e).__name__}: {e}")
 
+        self._tick += 1
         return self._wbc_handler.post_step(self._bus)
 
     def info_lines(self):
         lines = [
             f"Graph: {len(self._graph.nodes)} nodes, "
             f"{len(self._graph.edges)} edges",
+            f"Control rate: {self._control_hz:.0f} Hz",
         ]
+        for name in self._graph.schedule:
+            node = self._graph.nodes[name]
+            div = self._divisors.get(name, 1)
+            actual_hz = self._control_hz / div
+            if div == 1:
+                lines.append(f"  {name}: {actual_hz:.0f} Hz")
+            else:
+                lines.append(
+                    f"  {name}: {actual_hz:.0f} Hz "
+                    f"(every {div} ticks, declared {node.frequency_hz:.0f} Hz)")
         if self._controller is not None:
             lines.append(
                 f"Controller: "
