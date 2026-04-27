@@ -1,12 +1,12 @@
 """Reference handler for the SONIC observation encoder.
 
-This handler builds the 1762-dim encoder observation vector from bus
-signals, using standing-reference fields (zeros for joint positions,
-standing height for root z, 6D rotation for anchor orientation).
+Builds the 1762-dim encoder observation vector from bus signals.
 
-Extracted from policy_runners.SonicPolicyRunner._build_encoder_obs so
-that the generic model_runner can drive the SONIC encoder without
-hard-coded runner logic.
+When the planner is active and reference trajectory data is on the bus
+(written by SonicWBCHandler._extract_reference_trajectory), the handler
+uses the planner's reference motion for joint positions, velocities,
+root-z, and anchor orientation.  Otherwise falls back to standing-
+reference defaults.
 
 Usage in YAML:
     nodes:
@@ -36,6 +36,8 @@ ENCODER_OBS_LAYOUT = [
     ("motion_joint_positions_wrists_10frame_step1", 60),
 ]
 ENCODER_TOTAL_DIM = sum(d for _, d in ENCODER_OBS_LAYOUT)  # 1762
+
+N_LOWER_BODY = 12
 
 
 def _quat_conjugate(q):
@@ -75,10 +77,18 @@ def _anchor_orientation_6d(base_quat, ref_quat=None):
 def build_obs(bus, model_cfg, node_cfg):
     """Build the 1762-dim encoder observation from bus signals.
 
-    Expected bus signals:
+    Expected bus signals (always present):
         - "base_quaternion": shape [4], robot torso orientation (w, x, y, z)
         - "standing_height": shape [1], robot standing z-position
         - "encoder_mode": shape [1], int index into the 4-dim one-hot
+
+    Optional bus signals (written by SonicWBCHandler when planner active):
+        - "ref_joint_positions_10f":  [10, 29] IsaacLab order
+        - "ref_joint_velocities_10f": [10, 29]
+        - "ref_root_z_10f":           [10]
+        - "ref_orientation_10f":      [10, 4]  quaternion (w,x,y,z)
+        - "ref_root_z":               [1]
+        - "ref_orientation":          [4]
 
     Returns:
         dict mapping the ONNX input name to a [1, 1762] float32 array,
@@ -95,21 +105,75 @@ def build_obs(bus, model_cfg, node_cfg):
     encoder_mode = int(enc_mode_arr[0]) if enc_mode_arr is not None else 0
 
     standing_height = float(standing_h.flat[0])
-    orn_6 = _anchor_orientation_6d(quat)
+
+    mode_arr = bus.get("mode")
+    current_mode = int(mode_arr.flat[0]) if mode_arr is not None else 0
+
+    ref_jpos = bus.get("ref_joint_positions_10f")
+    ref_jvel = bus.get("ref_joint_velocities_10f")
+    ref_rz10 = bus.get("ref_root_z_10f")
+    ref_rz = bus.get("ref_root_z")
+    ref_orn = bus.get("ref_orientation")
+    ref_orn10 = bus.get("ref_orientation_10f")
+
+    mv_dir = bus.get("movement_direction")
+    has_movement = mv_dir is not None and np.any(np.abs(mv_dir) > 1e-6)
+    has_ref = ref_jpos is not None and current_mode != 0 and has_movement
+
+    if has_ref and ref_orn is not None:
+        orn_6 = _anchor_orientation_6d(quat, ref_orn)
+    else:
+        orn_6 = _anchor_orientation_6d(quat)
 
     obs = np.zeros(ENCODER_TOTAL_DIM, dtype=np.float32)
     offset = 0
     for name, dim in ENCODER_OBS_LAYOUT:
         if name == "encoder_mode_4":
             obs[offset + encoder_mode] = 1.0
+
+        elif name == "motion_joint_positions_10frame_step5":
+            if has_ref:
+                obs[offset:offset + dim] = ref_jpos.flatten()[:dim]
+            # else: zeros (standing reference)
+
+        elif name == "motion_joint_velocities_10frame_step5":
+            if has_ref and ref_jvel is not None:
+                obs[offset:offset + dim] = ref_jvel.flatten()[:dim]
+
         elif name == "motion_root_z_position_10frame_step5":
-            obs[offset:offset + dim] = standing_height
+            if has_ref and ref_rz10 is not None:
+                obs[offset:offset + dim] = ref_rz10.flatten()[:dim]
+            else:
+                obs[offset:offset + dim] = standing_height
+
         elif name == "motion_root_z_position":
-            obs[offset] = standing_height
+            if has_ref and ref_rz is not None:
+                obs[offset] = float(ref_rz.flat[0])
+            else:
+                obs[offset] = standing_height
+
         elif name == "motion_anchor_orientation":
             obs[offset:offset + dim] = orn_6
+
         elif name == "motion_anchor_orientation_10frame_step5":
-            obs[offset:offset + dim] = np.tile(orn_6, 10)
+            if has_ref and ref_orn10 is not None:
+                for fi in range(10):
+                    rq = ref_orn10[fi] if fi < len(ref_orn10) else ref_orn10[-1]
+                    obs[offset + fi * 6:offset + fi * 6 + 6] = \
+                        _anchor_orientation_6d(quat, rq)
+            else:
+                obs[offset:offset + dim] = np.tile(orn_6, 10)
+
+        elif name == "motion_joint_positions_lowerbody_10frame_step5":
+            if has_ref:
+                lb = ref_jpos[:, :N_LOWER_BODY]
+                obs[offset:offset + dim] = lb.flatten()[:dim]
+
+        elif name == "motion_joint_velocities_lowerbody_10frame_step5":
+            if has_ref and ref_jvel is not None:
+                lb = ref_jvel[:, :N_LOWER_BODY]
+                obs[offset:offset + dim] = lb.flatten()[:dim]
+
         offset += dim
 
     return {"obs_dict": obs.reshape(1, -1)}

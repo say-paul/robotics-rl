@@ -83,9 +83,15 @@ class SonicWBCHandler:
         self._gravity_hist = np.zeros((hf, 3), dtype=np.float32)
         self._last_action_il = np.zeros(na, dtype=np.float32)
 
+        self._qpos_history = np.zeros((4, 36), dtype=np.float32)
+        initial_qpos = data.qpos[:min(36, len(data.qpos))].astype(np.float32)
+        for i in range(4):
+            self._qpos_history[i, :len(initial_qpos)] = initial_qpos
+
         bus.put("standing_height", np.array([self._standing_height], dtype=np.float32))
         bus.put("encoder_mode", np.array([self._encoder_mode], dtype=np.float32))
         bus.put("base_quaternion", data.qpos[3:7].copy().astype(np.float64))
+        bus.put("context_mujoco_qpos", self._qpos_history.copy())
 
         return self._n_actuated
 
@@ -119,6 +125,12 @@ class SonicWBCHandler:
         self._action_hist[-1] = self._last_action_il
         self._gravity_hist[-1] = gravity
 
+        self._qpos_history = np.roll(self._qpos_history, -1, axis=0)
+        frame = data.qpos[:min(36, len(data.qpos))].astype(np.float32)
+        self._qpos_history[-1, :] = 0.0
+        self._qpos_history[-1, :len(frame)] = frame
+        bus.put("context_mujoco_qpos", self._qpos_history.copy())
+
         bus.put("base_quaternion", quat.astype(np.float64))
         bus.put("angular_velocity", omega.astype(np.float32))
         bus.put("joint_positions", qj.astype(np.float32))
@@ -132,6 +144,77 @@ class SonicWBCHandler:
         bus.put("jvel_hist", self._jvel_hist.flatten())
         bus.put("action_hist", self._action_hist.flatten())
         bus.put("gravity_hist", self._gravity_hist.flatten())
+
+        self._extract_reference_trajectory(bus)
+
+    # Number of lower-body joints in IsaacLab order (6 left leg + 6 right leg)
+    _N_LOWER_BODY = 12
+
+    # Planner output is 30 Hz; encoder needs 10 frames at "step 5" = every
+    # 100 ms.  At 30 Hz that's every 3 frames.
+    _REF_SAMPLE_INDICES_30HZ = [0, 3, 6, 9, 12, 15, 18, 21, 24, 27]
+
+    def _extract_reference_trajectory(self, bus):
+        """Read the planner's reference_trajectory from the bus and write
+        per-frame reference signals that the encoder handler consumes.
+
+        Writes (when trajectory available):
+          ref_joint_positions_10f  : [10, 29] IsaacLab order
+          ref_joint_velocities_10f : [10, 29] IsaacLab order
+          ref_root_z_10f           : [10]
+          ref_orientation_10f      : [10, 4]  quaternion (w,x,y,z)
+          ref_root_z               : [1]      current frame root z
+          ref_orientation          : [4]      current frame quat
+        """
+        traj = bus.get("reference_trajectory")
+        if traj is None:
+            return
+
+        traj = np.asarray(traj, dtype=np.float32)
+        if traj.ndim == 3:
+            traj = traj[0]  # [N, 36]
+        n_frames = traj.shape[0]
+        if n_frames < 1:
+            return
+
+        npf = bus.get("num_pred_frames")
+        if npf is not None:
+            n_valid = min(int(npf.flat[0]), n_frames)
+        else:
+            n_valid = n_frames
+
+        na = self._num_actions
+        il2mj = self._il2mj
+        n_samples = len(self._REF_SAMPLE_INDICES_30HZ)
+
+        jpos_il = np.zeros((n_samples, na), dtype=np.float32)
+        root_z = np.zeros(n_samples, dtype=np.float32)
+        orientations = np.zeros((n_samples, 4), dtype=np.float64)
+
+        for si, fi_30 in enumerate(self._REF_SAMPLE_INDICES_30HZ):
+            fi = min(fi_30, n_valid - 1)
+            frame = traj[fi]
+
+            root_z[si] = frame[2]
+            orientations[si] = frame[3:7]
+
+            for il_i in range(na):
+                mj_i = il2mj[il_i]
+                jpos_il[si, il_i] = frame[7 + mj_i] if (7 + mj_i) < 36 else 0.0
+
+        jvel_il = np.zeros_like(jpos_il)
+        dt_30 = 1.0 / 30.0
+        for si in range(n_samples - 1):
+            jvel_il[si] = (jpos_il[si + 1] - jpos_il[si]) / (dt_30 * 3)
+        if n_samples > 1:
+            jvel_il[-1] = jvel_il[-2]
+
+        bus.put("ref_joint_positions_10f", jpos_il)
+        bus.put("ref_joint_velocities_10f", jvel_il)
+        bus.put("ref_root_z_10f", root_z)
+        bus.put("ref_orientation_10f", orientations.astype(np.float64))
+        bus.put("ref_root_z", np.array([root_z[0]], dtype=np.float32))
+        bus.put("ref_orientation", orientations[0].astype(np.float64))
 
     def post_step(self, bus):
         """Read action from bus, remap IsaacLab->MuJoCo, return (target, kps, kds)."""

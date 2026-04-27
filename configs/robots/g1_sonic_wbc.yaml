@@ -169,6 +169,7 @@ execution:
       execution_mode: "reactive"
       hold_last_input: false
       max_staleness_ms: 250
+      handler: "handlers.sonic_planner.build_planner_obs"
 
     - name: "encoder_inference"
       model: "sonic_encoder"
@@ -343,22 +344,19 @@ configuration:
     # When controller is active, harness moves to H/J/K keys.
     keyboard:
       movement:
-        UP:    { movement_direction: [1.0, 0.0, 0.0], locomotion_mode: WALK }
-        DOWN:  { movement_direction: [-1.0, 0.0, 0.0], locomotion_mode: WALK }
-        LEFT:  { movement_direction: [0.0, 1.0, 0.0], locomotion_mode: WALK }
-        RIGHT: { movement_direction: [0.0, -1.0, 0.0], locomotion_mode: WALK }
+        UP:    { movement_direction: [1.0, 0.0, 0.0] }
+        DOWN:  { movement_direction: [-1.0, 0.0, 0.0] }
+        LEFT:  { movement_direction: [0.0, 1.0, 0.0] }
+        RIGHT: { movement_direction: [0.0, -1.0, 0.0] }
 
       styles:
-        "1": WALK
-        "2": SLOW_WALK
+        "0": IDLE
+        "1": SLOW_WALK
+        "2": WALK
         "3": RUN
         "4": STEALTH_WALK
-        "5": INJURED_WALK
-        "6": ZOMBIE_WALK
-        "7": HAPPY_DANCE_WALK
-        "8": GUN_WALK
-        "9": SCARE_WALK
-        "0": IDLE
+        "5": ZOMBIE_WALK
+        "6": HAPPY_DANCE_WALK
 
   # Timing
   simulation_dt: 0.002
