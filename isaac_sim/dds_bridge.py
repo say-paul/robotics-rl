@@ -5,14 +5,14 @@ Run this script **inside the Isaac Sim Python environment** on the remote
 machine.  It loads a robot USD asset, publishes joint state over DDS, and
 subscribes to joint commands from the policy runner.
 
+Uses the dynamic_control interface instead of omni.isaac.core Articulation
+to avoid the tensor view invalidation bug in Isaac Sim 5.x.
+
 Usage:
-    # From the Isaac Sim Python environment:
-    ./python.sh isaac_sim/dds_bridge.py \\
-        --usd /path/to/robot_scene.usd \\
-        --robot-prim /World/G1 \\
-        --domain-id 0 \\
-        --state-topic rt/g1/state \\
-        --command-topic rt/g1/command
+    ./python.sh isaac_sim/dds_bridge.py \
+        --usd /tmp/g1_scene.usd \
+        --robot-prim /World/G1 \
+        --domain-id 0
 
 Requirements:
     pip install cyclonedds   (inside Isaac Sim's Python env)
@@ -42,7 +42,6 @@ def main():
                         help="DDS topic for subscribing to joint commands")
     args = parser.parse_args()
 
-    # -- Isaac Sim setup (must come before any other isaacsim imports) --
     try:
         from isaacsim import SimulationApp
     except ImportError:
@@ -50,11 +49,12 @@ def main():
         print("  Example: ./python.sh isaac_sim/dds_bridge.py --usd ...")
         sys.exit(1)
 
-    sim_app = SimulationApp({"headless": False})
+    sim_app = SimulationApp({"headless": True})
 
     import omni.isaac.core.utils.stage as stage_utils
-    from omni.isaac.core import World
-    from omni.isaac.core.articulations import Articulation
+    from omni.isaac.dynamic_control import _dynamic_control
+    import omni.kit.app
+    import omni.physx
 
     # -- DDS setup --
     try:
@@ -68,7 +68,6 @@ def main():
         sim_app.close()
         sys.exit(1)
 
-    # Import DDS types — add the rdp-demo scripts dir to path
     from pathlib import Path
     scripts_dir = str(Path(__file__).resolve().parent.parent / "scripts")
     sys.path.insert(0, scripts_dir)
@@ -78,18 +77,50 @@ def main():
     print(f"Loading USD: {args.usd}")
     stage_utils.open_stage(args.usd)
 
-    world = World(stage_units_in_meters=1.0)
-    world.scene.add_default_ground_plane()
-    world.reset()
+    # Find the robot articulation prim
+    from pxr import UsdPhysics
+    stage = omni.usd.get_context().get_stage()
+    articulation_prims = []
+    for prim in stage.Traverse():
+        if prim.HasAPI(UsdPhysics.ArticulationRootAPI):
+            articulation_prims.append(str(prim.GetPath()))
 
-    robot = world.scene.get_object(args.robot_prim)
-    if robot is None:
-        robot = Articulation(prim_path=args.robot_prim)
-        world.scene.add(robot)
-        world.reset()
+    robot_prim_path = args.robot_prim
+    if articulation_prims:
+        print(f"Articulations found: {articulation_prims}")
+        if robot_prim_path not in articulation_prims:
+            robot_prim_path = articulation_prims[0]
+            print(f"  '{args.robot_prim}' not found, using: {robot_prim_path}")
+    else:
+        print("No articulations found. Root prims:")
+        for prim in stage.GetPseudoRoot().GetChildren():
+            print(f"  {prim.GetPath()}")
+        sim_app.close()
+        sys.exit(1)
 
-    n_dofs = robot.num_dof
-    print(f"Robot: {args.robot_prim}, {n_dofs} DOFs")
+    # Configure physics timestep
+    from omni.physx import get_physx_interface
+    physx = get_physx_interface()
+
+    # Step simulation a few times to let physics initialize
+    dc = _dynamic_control.acquire_dynamic_control_interface()
+
+    # Start simulation
+    omni.timeline.get_timeline_interface().play()
+
+    # Wait for physics to settle and acquire articulation handle
+    for _ in range(10):
+        sim_app.update()
+
+    art_handle = dc.get_articulation(robot_prim_path)
+    if art_handle == _dynamic_control.INVALID_HANDLE:
+        print(f"Error: could not get articulation handle for '{robot_prim_path}'")
+        print("  Make sure the USD has a valid PhysicsScene and ArticulationRootAPI.")
+        sim_app.close()
+        sys.exit(1)
+
+    n_dofs = dc.get_articulation_dof_count(art_handle)
+    print(f"Robot: {robot_prim_path}, {n_dofs} DOFs")
 
     # -- DDS participants --
     dp = DomainParticipant(domain_id=args.domain_id)
@@ -104,27 +135,40 @@ def main():
     print(f"Sim dt={args.sim_dt}s  ({1.0/args.sim_dt:.0f} Hz)")
     print("Running ... (Ctrl-C to stop)\n")
 
-    # -- Simulation loop --
-    world.set_simulation_dt(physics_dt=args.sim_dt, rendering_dt=args.sim_dt * 4)
-
+    step_count = 0
+    running = True
     try:
-        while sim_app.is_running():
-            world.step(render=True)
+        while running:
+            sim_app.update()
+            step_count += 1
 
-            # -- Publish state --
-            joint_positions = robot.get_joint_positions()
-            joint_velocities = robot.get_joint_velocities()
-            root_pos, root_quat = robot.get_world_pose()
-            root_vel = robot.get_linear_velocity()
-            root_ang_vel = robot.get_angular_velocity()
+            if not omni.timeline.get_timeline_interface().is_playing():
+                omni.timeline.get_timeline_interface().play()
 
-            # Pack into MuJoCo convention:
-            #   qpos = [root_pos(3), root_quat_wxyz(4), joints(n)]
-            #   qvel = [root_lin_vel(3), root_ang_vel(3), joint_vel(n)]
-            quat_wxyz = np.array([root_quat[3], root_quat[0],
-                                  root_quat[1], root_quat[2]])
-            qpos = np.concatenate([root_pos, quat_wxyz, joint_positions])
-            qvel = np.concatenate([root_vel, root_ang_vel, joint_velocities])
+            root_body = dc.get_articulation_root_body(art_handle)
+            if root_body == _dynamic_control.INVALID_HANDLE:
+                art_handle = dc.get_articulation(robot_prim_path)
+                continue
+
+            # Root pose
+            pose = dc.get_rigid_body_pose(root_body)
+            root_pos = np.array([pose.p.x, pose.p.y, pose.p.z])
+            root_quat_wxyz = np.array([pose.r.w, pose.r.x, pose.r.y, pose.r.z])
+
+            # Root velocity
+            lin_vel = dc.get_rigid_body_linear_velocity(root_body)
+            ang_vel = dc.get_rigid_body_angular_velocity(root_body)
+            root_lin = np.array([lin_vel.x, lin_vel.y, lin_vel.z])
+            root_ang = np.array([ang_vel.x, ang_vel.y, ang_vel.z])
+
+            # Joint state
+            dof_states = dc.get_articulation_dof_states(art_handle, _dynamic_control.STATE_ALL)
+            joint_pos = dof_states["pos"]
+            joint_vel = dof_states["vel"]
+
+            # Pack into MuJoCo convention
+            qpos = np.concatenate([root_pos, root_quat_wxyz, joint_pos])
+            qvel = np.concatenate([root_lin, root_ang, joint_vel])
 
             state_msg = RobotStateDDS(
                 qpos=qpos.tolist(),
@@ -133,16 +177,30 @@ def main():
             )
             state_writer.write(state_msg)
 
-            # -- Read commands --
+            if step_count % 500 == 0:
+                print(f"[bridge] step={step_count} z={root_pos[2]:.3f} "
+                      f"dofs={len(joint_pos)}")
+
+            # Read commands
             samples = command_reader.take(N=100)
             if samples:
                 cmd = samples[-1]
                 targets = np.array(cmd.target_positions, dtype=np.float32)
-                robot.set_joint_position_targets(targets[:n_dofs])
+                for i in range(min(len(targets), n_dofs)):
+                    dc.set_dof_position_target(
+                        dc.get_articulation_dof(art_handle, i),
+                        float(targets[i]))
 
     except KeyboardInterrupt:
         print("\nStopping ...")
+    except Exception as e:
+        print(f"\nError: {e}")
     finally:
+        running = False
+        try:
+            omni.timeline.get_timeline_interface().stop()
+        except Exception:
+            pass
         sim_app.close()
         print("Isaac Sim closed.")
 
