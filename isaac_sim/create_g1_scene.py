@@ -28,7 +28,7 @@ def main():
 
     sim_app = SimulationApp({"headless": True})
 
-    from pxr import Usd, UsdGeom, UsdPhysics, Sdf, Gf, PhysxSchema
+    from pxr import Usd, UsdGeom, UsdPhysics, UsdLux, Sdf, Gf, PhysxSchema
     import omni.usd
 
     stage = omni.usd.get_context().get_stage()
@@ -47,7 +47,30 @@ def main():
     ground.CreateFaceVertexCountsAttr([4])
     ground.CreateFaceVertexIndicesAttr([0, 1, 2, 3])
     ground.CreateNormalsAttr([(0, 0, 1)] * 4)
-    collision = UsdPhysics.CollisionAPI.Apply(ground.GetPrim())
+    UsdPhysics.CollisionAPI.Apply(ground.GetPrim())
+
+    # Dome light for ambient illumination
+    dome = UsdLux.DomeLight.Define(stage, "/DomeLight")
+    dome.CreateIntensityAttr(300.0)
+
+    # Distant light for directional shadows
+    dist_light = UsdLux.DistantLight.Define(stage, "/DistantLight")
+    dist_light.CreateIntensityAttr(500.0)
+    dist_xform = UsdGeom.Xformable(dist_light.GetPrim())
+    dist_xform.AddRotateXYZOp().Set(Gf.Vec3f(-45, 30, 0))
+
+    # Camera — captured from user's Isaac Sim viewport
+    camera = UsdGeom.Camera.Define(stage, "/RobotCamera")
+    cam_xform = UsdGeom.Xformable(camera.GetPrim())
+    cam_mat = Gf.Matrix4d(
+        -0.699875771292428, 0.7142645901609784, 0.0, 0.0,
+        -0.31820982090342315, -0.3117995024608676, 0.8952784930655752, 0.0,
+        0.6394657259294214, 0.626583725855792, 0.44550692458617625, 0.0,
+        5.029047112805129, 4.372604376025868, 3.713891269049331, 1.0,
+    )
+    cam_xform.AddTransformOp().Set(cam_mat)
+    camera.CreateFocalLengthAttr(24.0)
+    camera.CreateClippingRangeAttr(Gf.Vec2f(0.1, 1000.0))
 
     # Reference the robot USD
     robot_xform = UsdGeom.Xform.Define(stage, "/World/G1")

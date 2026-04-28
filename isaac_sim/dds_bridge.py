@@ -122,6 +122,13 @@ def main():
     n_dofs = dc.get_articulation_dof_count(art_handle)
     print(f"Robot: {robot_prim_path}, {n_dofs} DOFs")
 
+    # Start HLS viewport streaming (background threads)
+    try:
+        from viewport_stream import start as start_stream
+        start_stream()
+    except Exception as e:
+        print(f"[bridge] viewport streaming not available: {e}")
+
     # -- DDS participants --
     dp = DomainParticipant(domain_id=args.domain_id)
     state_topic = Topic(dp, args.state_topic, RobotStateDDS)

@@ -14,6 +14,7 @@ Usage (from launch_robot.py):
 
 import os
 import signal
+import threading
 import time
 import tempfile
 
@@ -135,9 +136,41 @@ class DDSEngine(SimulationEngine):
         signal.signal(signal.SIGINT, _stop)
         signal.signal(signal.SIGTERM, _stop)
 
+        # -- Stdin key reader (non-blocking, raw mode) --
+        _policy_enabled = False
+        _stdin_lock = threading.Lock()
+
+        def _stdin_reader():
+            nonlocal _policy_enabled
+            import sys, tty, termios
+            fd = sys.stdin.fileno()
+            old = termios.tcgetattr(fd)
+            try:
+                tty.setcbreak(fd)
+                while self._running:
+                    ch = sys.stdin.read(1)
+                    if not ch:
+                        break
+                    keycode = ord(ch)
+                    if keycode in (ord('p'), ord('P')):
+                        with _stdin_lock:
+                            _policy_enabled = not _policy_enabled
+                        status = "ENABLED" if _policy_enabled else "DISABLED"
+                        print(f"\n[Policy] {status}")
+                    elif controller is not None:
+                        controller.handle_event(keycode)
+            finally:
+                termios.tcsetattr(fd, termios.TCSADRAIN, old)
+
+        threading.Thread(target=_stdin_reader, daemon=True).start()
+
         print(f"[DDSEngine] Running at {self._control_hz:.0f} Hz, "
               f"{n_actuated} actuated joints")
-        print(f"[DDSEngine] Press Ctrl-C to stop\n")
+        print(f"[DDSEngine] Press P to toggle policy, Ctrl-C to stop")
+        if controller is not None:
+            for line in controller.banner_lines():
+                print(f"  {line}")
+        print()
 
         # -- Main control loop --
         while self._running:
@@ -151,15 +184,19 @@ class DDSEngine(SimulationEngine):
                 state.qvel = np.array(latest.qvel, dtype=np.float64)
                 state.time = latest.timestamp_ns * 1e-9
 
-            target_pos, kps, kds = runner.step(state)
+            with _stdin_lock:
+                active = _policy_enabled
 
-            cmd = JointCommandDDS(
-                target_positions=target_pos.astype(float).tolist(),
-                kps=kps.astype(float).tolist(),
-                kds=kds.astype(float).tolist(),
-                timestamp_ns=int(time.time() * 1e9),
-            )
-            writer.write(cmd)
+            if active:
+                target_pos, kps, kds = runner.step(state)
+
+                cmd = JointCommandDDS(
+                    target_positions=target_pos.astype(float).tolist(),
+                    kps=kps.astype(float).tolist(),
+                    kds=kds.astype(float).tolist(),
+                    timestamp_ns=int(time.time() * 1e9),
+                )
+                writer.write(cmd)
 
             elapsed = time.monotonic() - t0
             sleep_time = dt - elapsed
