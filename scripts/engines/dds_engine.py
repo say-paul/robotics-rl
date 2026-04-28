@@ -67,7 +67,7 @@ class DDSEngine(SimulationEngine):
 
     def run(self, runner, *, controller=None, **kwargs) -> None:
         try:
-            from cyclonedds.core import DomainParticipant
+            from cyclonedds.domain import DomainParticipant
             from cyclonedds.sub import DataReader
             from cyclonedds.pub import DataWriter
             from cyclonedds.topic import Topic
@@ -86,7 +86,7 @@ class DDSEngine(SimulationEngine):
         if self._peer:
             _configure_peer_discovery(self._peer, domain_id)
 
-        dp = DomainParticipant(domain=domain_id)
+        dp = DomainParticipant(domain_id=domain_id)
         state_topic = Topic(dp, state_topic_name, RobotStateDDS)
         command_topic = Topic(dp, command_topic_name, JointCommandDDS)
 

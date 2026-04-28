@@ -58,7 +58,7 @@ def main():
 
     # -- DDS setup --
     try:
-        from cyclonedds.core import DomainParticipant
+        from cyclonedds.domain import DomainParticipant
         from cyclonedds.sub import DataReader
         from cyclonedds.pub import DataWriter
         from cyclonedds.topic import Topic
@@ -92,7 +92,7 @@ def main():
     print(f"Robot: {args.robot_prim}, {n_dofs} DOFs")
 
     # -- DDS participants --
-    dp = DomainParticipant(domain=args.domain_id)
+    dp = DomainParticipant(domain_id=args.domain_id)
     state_topic = Topic(dp, args.state_topic, RobotStateDDS)
     command_topic = Topic(dp, args.command_topic, JointCommandDDS)
     state_writer = DataWriter(dp, state_topic)
