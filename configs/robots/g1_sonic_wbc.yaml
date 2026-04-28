@@ -12,8 +12,9 @@
 # STAGE 0: Variables
 # ----------------------------------------------------------------------------
 variables:
-  GROOT_WBC_ROOT: "/home/saypaul/GR00T-WholeBodyControl"
-  RDP_ROOT: "/home/saypaul/git_repos/rdp-demo"
+  # Override in .env or environment. See .env.example.
+  GROOT_WBC_ROOT: ""
+  RDP_ROOT: ""
 # ----------------------------------------------------------------------------
 # STAGE 1: Metadata
 # ----------------------------------------------------------------------------

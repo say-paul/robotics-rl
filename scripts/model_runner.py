@@ -23,6 +23,7 @@ Usage:
 import argparse
 import importlib
 import json
+import os
 import re
 import signal as signal_mod
 import sys
@@ -40,6 +41,24 @@ import yaml
 # YAML loading (shared with launch_robot.py)
 # ---------------------------------------------------------------------------
 
+def load_dotenv(start_dir: Path | None = None) -> dict[str, str]:
+    """Load variables from the nearest .env file (walking up from start_dir)."""
+    search = start_dir or Path.cwd()
+    for parent in [search, *search.parents]:
+        env_file = parent / ".env"
+        if env_file.is_file():
+            values: dict[str, str] = {}
+            for line in env_file.read_text().splitlines():
+                line = line.strip()
+                if not line or line.startswith("#"):
+                    continue
+                key, _, val = line.partition("=")
+                if _:
+                    values[key.strip()] = val.strip().strip("\"'")
+            return values
+    return {}
+
+
 def substitute_variables(obj, variables):
     """Recursively replace ${VAR_NAME} placeholders in a config tree."""
     if isinstance(obj, dict):
@@ -55,7 +74,10 @@ def substitute_variables(obj, variables):
 
 
 def load_robot_config(yaml_path):
-    """Load a robot YAML and resolve all ${VAR} references."""
+    """Load a robot YAML and resolve all ${VAR} references.
+
+    Variable precedence (highest wins): os.environ > .env file > YAML variables.
+    """
     path = Path(yaml_path)
     if not path.exists():
         print(f"Error: robot config not found: {path}")
@@ -63,6 +85,9 @@ def load_robot_config(yaml_path):
     with open(path) as f:
         raw = yaml.safe_load(f)
     variables = raw.get("variables", {})
+    dotenv = load_dotenv(path.parent)
+    variables.update(dotenv)
+    variables.update({k: v for k, v in os.environ.items() if k in variables})
     return substitute_variables(raw, variables)
 
 

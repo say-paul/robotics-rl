@@ -227,6 +227,10 @@ def run_simulation(scene_xml, policy_runner, *, sim_dt, decimation,
     # -- Simulation loop --
     counter = 0
     with mujoco.viewer.launch_passive(model, data, key_callback=key_callback) as viewer:
+        viewer.cam.distance = 4.0
+        viewer.cam.azimuth = -130
+        viewer.cam.elevation = -20
+        viewer.cam.lookat[:] = data.qpos[:3]
         while viewer.is_running():
             harness.update()
             data.xfrc_applied[torso_id, :3] = harness.compute_force(
