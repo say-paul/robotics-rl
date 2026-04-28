@@ -129,7 +129,7 @@ def build_obs(bus, model_cfg, node_cfg):
     offset = 0
     for name, dim in ENCODER_OBS_LAYOUT:
         if name == "encoder_mode_4":
-            obs[offset + encoder_mode] = 1.0
+            obs[offset] = float(encoder_mode)
 
         elif name == "motion_joint_positions_10frame_step5":
             if has_ref:
