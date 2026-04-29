@@ -41,6 +41,10 @@ fi
 # Clean stale shared memory from previous runs
 rm -f /dev/shm/psm_* 2>/dev/null
 
+# Upgrade camera resolution to 720p
+sed -i 's/height: int = 480/height: int = 720/g; s/width: int =  640/width: int = 1280/g; s/height=480/height=720/g; s/width=640/width=1280/g' \
+    /opt/unitree_sim/tasks/common_config/camera_configs.py 2>/dev/null
+
 echo "[entrypoint] Starting G1 wholebody simulation..."
 # The shm name will be written by a background watcher after DDS init
 (while true; do
@@ -64,4 +68,6 @@ cd /opt/unitree_sim && exec /isaac-sim/python.sh sim_main.py \
     --headless \
     --enable_cameras \
     --camera_jpeg_quality 95 \
+    --camera_include "front_camera,world_camera" \
+    --camera_exclude "" \
     "$@"

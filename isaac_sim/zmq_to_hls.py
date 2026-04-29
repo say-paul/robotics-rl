@@ -55,7 +55,9 @@ video{flex:1;object-fit:contain;background:#111}
 <span class="key" data-key="q">Q strafe-L</span>
 <span class="key" data-key="e">E strafe-R</span>
 <span class="key" data-key="x">X stop</span>
+<span class="key" id="cam-btn" style="background:#336">C camera</span>
 </div>
+<div id="cam-name" style="position:fixed;top:10px;right:10px;color:#6af;font:14px monospace"></div>
 <script src="https://cdn.jsdelivr.net/npm/hls.js@latest"></script>
 <script>
 const u='/hls/stream.m3u8',v=document.getElementById('v'),hud=document.getElementById('hud');
@@ -78,14 +80,27 @@ document.addEventListener('keydown',e=>{
   const k=e.key.toLowerCase();
   if('wsadqex'.includes(k))send(k);
 });
-document.querySelectorAll('.key').forEach(el=>{
+document.querySelectorAll('.key[data-key]').forEach(el=>{
   el.addEventListener('click',()=>send(el.dataset.key));
+});
+document.getElementById('cam-btn').addEventListener('click',()=>{
+  fetch('/switch',{method:'POST'}).then(r=>r.json()).then(d=>{
+    document.getElementById('cam-name').textContent=d.camera||''});
+});
+document.addEventListener('keydown',e=>{
+  if(e.key.toLowerCase()==='c'){
+    fetch('/switch',{method:'POST'}).then(r=>r.json()).then(d=>{
+      document.getElementById('cam-name').textContent=d.camera||''});
+  }
 });
 </script></body></html>"""
 
 
 _velocity = {"vx": 0.0, "vy": 0.0, "vyaw": 0.0, "height": 0.8}
 _shm_writer = None
+_cameras = {}
+_active_camera = None
+_camera_lock = threading.Lock()
 
 
 def _init_shm(shm_name):
@@ -163,6 +178,21 @@ class HlsHandler(BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(json.dumps(result).encode())
             return
+        if self.path == "/switch":
+            with _camera_lock:
+                names = list(_cameras.keys())
+                if names and _active_camera in names:
+                    idx = (names.index(_active_camera) + 1) % len(names)
+                    _switch_camera(names[idx])
+                    result = {"camera": names[idx]}
+                else:
+                    result = {"camera": _active_camera or "none"}
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Access-Control-Allow-Origin", "*")
+            self.end_headers()
+            self.wfile.write(json.dumps(result).encode())
+            return
         self.send_response(404)
         self.end_headers()
 
@@ -210,29 +240,64 @@ class HlsHandler(BaseHTTPRequestHandler):
             self.end_headers()
 
 
-def zmq_receiver(host, port):
+def _switch_camera(name):
+    """Switch the active camera feed."""
+    global _active_camera
+    if name not in _cameras:
+        return
+    _active_camera = name
+    print(f"[zmq] Switched to camera: {name} (port {_cameras[name]})")
+
+
+def zmq_receiver(host, cameras_config):
+    """Subscribe to all cameras, forward the active one to the frame queue."""
+    global _active_camera, _cameras
+
     ctx = zmq.Context()
-    sock = ctx.socket(zmq.SUB)
-    sock.setsockopt(zmq.RCVHWM, 1)
-    sock.setsockopt(zmq.LINGER, 0)
-    sock.setsockopt_string(zmq.SUBSCRIBE, "")
-    addr = f"tcp://{host}:{port}"
-    print(f"[zmq] Connecting to {addr}...")
-    sock.connect(addr)
+    socks = {}
+
+    for entry in cameras_config.split(","):
+        parts = entry.strip().split(":")
+        if len(parts) == 2:
+            name, port = parts[0], int(parts[1])
+            _cameras[name] = port
+            sock = ctx.socket(zmq.SUB)
+            sock.setsockopt(zmq.RCVHWM, 1)
+            sock.setsockopt(zmq.LINGER, 0)
+            sock.setsockopt_string(zmq.SUBSCRIBE, "")
+            addr = f"tcp://{host}:{port}"
+            sock.connect(addr)
+            socks[name] = sock
+            print(f"[zmq] Subscribed to {name} at {addr}")
+
+    if not socks:
+        print("[zmq] No cameras configured")
+        return
+
+    _active_camera = list(socks.keys())[0]
+    print(f"[zmq] Active camera: {_active_camera}")
+
+    poller = zmq.Poller()
+    for name, sock in socks.items():
+        poller.register(sock, zmq.POLLIN)
 
     count = 0
     while True:
         try:
-            jpg_bytes = sock.recv()
-            count += 1
-            try:
-                _frame_queue.put_nowait(jpg_bytes)
-            except queue.Full:
-                pass
-            if count == 1:
-                print(f"[zmq] First frame received ({len(jpg_bytes)} bytes)")
-            elif count % 300 == 0:
-                print(f"[zmq] {count} frames received")
+            events = dict(poller.poll(timeout=100))
+            for name, sock in socks.items():
+                if sock in events:
+                    jpg_bytes = sock.recv(zmq.NOBLOCK)
+                    if name == _active_camera:
+                        count += 1
+                        try:
+                            _frame_queue.put_nowait(jpg_bytes)
+                        except queue.Full:
+                            pass
+                        if count == 1:
+                            print(f"[zmq] First frame from {name} ({len(jpg_bytes)} bytes)")
+                        elif count % 300 == 0:
+                            print(f"[zmq] {count} frames from {name}")
         except Exception as e:
             print(f"[zmq] Error: {e}")
             time.sleep(1)
@@ -291,6 +356,8 @@ def main():
     parser = argparse.ArgumentParser(description="ZMQ camera to HLS")
     parser.add_argument("--host", default="localhost")
     parser.add_argument("--port", type=int, default=55555)
+    parser.add_argument("--cameras", default="front:55555,world:55556",
+                        help="Comma-separated name:port pairs for available cameras")
     parser.add_argument("--cpu", action="store_true",
                         help="Use libx264 CPU encoder instead of NVENC")
     parser.add_argument("--shm", default=None,
@@ -333,7 +400,7 @@ def main():
     print(f"[hls] Server at http://localhost:{LISTEN_PORT}")
 
     threading.Thread(target=lambda: ffmpeg_writer(cpu=args.cpu), daemon=True).start()
-    zmq_receiver(args.host, args.port)
+    zmq_receiver(args.host, args.cameras)
 
 
 if __name__ == "__main__":
