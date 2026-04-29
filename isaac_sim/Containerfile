@@ -1,6 +1,8 @@
 # This project was developed with assistance from AI tools.
 #
-# Build:  make isaac-build
+# Isaac Sim 5.1 + IsaacLab + unitree_sim_isaaclab for G1 wholebody walking.
+#
+# Build:  make isaac-build  (takes ~30 min first time)
 # Run:    make isaac-run
 
 FROM nvcr.io/nvidia/isaac-sim:5.1.0
@@ -8,19 +10,44 @@ FROM nvcr.io/nvidia/isaac-sim:5.1.0
 ENV ACCEPT_EULA=Y
 USER root
 
-# Build CycloneDDS C library (needed by unitree_sdk2py)
-RUN apt-get update -qq && apt-get install -y -qq cmake build-essential git iproute2 && \
-    git clone --depth 1 -b releases/0.10.x https://github.com/eclipse-cyclonedds/cyclonedds /tmp/cyclonedds && \
+# System deps
+RUN apt-get update -qq && \
+    apt-get install -y -qq cmake build-essential git git-lfs iproute2 && \
+    apt-get clean
+
+# Build CycloneDDS C library
+RUN git clone --depth 1 -b releases/0.10.x \
+      https://github.com/eclipse-cyclonedds/cyclonedds /tmp/cyclonedds && \
     mkdir /tmp/cyclonedds/build && cd /tmp/cyclonedds/build && \
     cmake .. -DCMAKE_INSTALL_PREFIX=/opt/cyclonedds && \
     cmake --build . --target install -j$(nproc) && \
-    rm -rf /tmp/cyclonedds && \
-    apt-get clean
-
+    rm -rf /tmp/cyclonedds
 ENV CYCLONEDDS_HOME=/opt/cyclonedds
 
-# Pre-install Python deps
-RUN ./python.sh -m pip install --no-cache-dir cyclonedds tyro pin
+# Install IsaacLab
+ENV TERM=xterm
+RUN git clone --depth 1 https://github.com/isaac-sim/IsaacLab.git /opt/IsaacLab && \
+    cd /opt/IsaacLab && \
+    ln -s /isaac-sim _isaac_sim && \
+    ./isaaclab.sh --install
+
+# Clone unitree_sim_isaaclab + fetch assets
+RUN git clone https://github.com/unitreerobotics/unitree_sim_isaaclab.git /opt/unitree_sim && \
+    cd /opt/unitree_sim && \
+    git submodule update --init --recursive && \
+    git lfs install && git lfs pull; \
+    cd /opt/unitree_sim && bash fetch_assets.sh || true
+
+# Install unitree_sdk2py
+RUN git clone --depth 1 https://github.com/unitreerobotics/unitree_sdk2_python /tmp/unitree_sdk2 && \
+    find /tmp/unitree_sdk2 -type d -exec sh -c 'test ! -f "$1/__init__.py" && touch "$1/__init__.py"' _ {} \; && \
+    /isaac-sim/python.sh -m pip install --no-cache-dir /tmp/unitree_sdk2 && \
+    rm -rf /tmp/unitree_sdk2
+
+# Install unitree_sim requirements + package
+RUN cd /opt/unitree_sim && \
+    /isaac-sim/python.sh -m pip install --no-cache-dir -r requirements.txt && \
+    /isaac-sim/python.sh -m pip install --no-cache-dir -e teleimager || true
 
 COPY --chmod=755 entrypoint.sh /entrypoint.sh
 

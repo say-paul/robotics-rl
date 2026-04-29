@@ -81,6 +81,16 @@ def main():
     else:
         robot_xform.AddTranslateOp().Set(Gf.Vec3d(0, 0, args.height))
 
+    # Keep the USD's original stiffness (strong enough to hold against gravity)
+    # but set damping to prevent overshoot. Ratio 0.025 from Unitree's config.
+    DAMPING_RATIO = 0.025
+    for prim in stage.Traverse():
+        drive = UsdPhysics.DriveAPI.Get(prim, "angular")
+        if drive and drive.GetStiffnessAttr().HasValue():
+            kp = drive.GetStiffnessAttr().Get()
+            if kp and kp > 0:
+                drive.GetDampingAttr().Set(kp * DAMPING_RATIO)
+
     stage.GetRootLayer().Export(args.output)
     print(f"Scene saved to: {args.output}")
 

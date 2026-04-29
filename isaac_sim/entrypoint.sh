@@ -3,18 +3,33 @@
 set -e
 
 export CYCLONEDDS_HOME=${CYCLONEDDS_HOME:-/opt/cyclonedds}
+# Override container's default streaming mode — prevents sim_app timeout
+unset LIVESTREAM
+export HEADLESS=1
 
-if [ ! -d "/groot/gear_sonic" ]; then
-    echo "Error: mount GR00T-WholeBodyControl at /groot"
-    exit 1
+# Enable multicast on loopback for DDS
+ip link set lo multicast on 2>/dev/null || true
+
+# Patch Unitree SDK DDS config for loopback
+find /opt/unitree_sim /isaac-sim/kit -path "*/unitree_sdk2py/core/channel_config.py" 2>/dev/null | while read f; do
+    sed -i 's/multicast="default"/multicast="true"/g' "$f" 2>/dev/null
+done
+
+# Copy missing .so files for unitree_sdk2py CRC
+SDK_LIB="/isaac-sim/kit/python/lib/python3.11/site-packages/unitree_sdk2py/utils/lib"
+if [ -d "/groot/external_dependencies/unitree_sdk2_python/unitree_sdk2py/utils/lib" ]; then
+    mkdir -p "$SDK_LIB"
+    cp -f /groot/external_dependencies/unitree_sdk2_python/unitree_sdk2py/utils/lib/*.so "$SDK_LIB/"
+    echo "[entrypoint] Copied CRC .so to $SDK_LIB/"
+    ls "$SDK_LIB/"
 fi
 
-# Create scene USD
-echo "[entrypoint] Creating scene..."
-/isaac-sim/python.sh /rdp/isaac_sim/create_g1_scene.py \
-    --robot-usd /groot/gear_sonic/data/robots/g1/g1_29dof_rev_1_0/g1_29dof_rev_1_0.usd \
-    --output /tmp/g1_scene.usd
-
-echo "[entrypoint] Starting DDS bridge..."
-exec /isaac-sim/python.sh /rdp/isaac_sim/dds_bridge.py \
-    --usd /tmp/g1_scene.usd --robot-prim /World/G1 --domain-id 0
+echo "[entrypoint] Starting G1 wholebody simulation..."
+cd /opt/unitree_sim && exec /isaac-sim/python.sh sim_main.py \
+    --task Isaac-Move-Cylinder-G129-Dex1-Wholebody \
+    --action_source dds_wholebody \
+    --robot_type g129 \
+    --enable_dex1_dds \
+    --headless \
+    --enable_cameras \
+    "$@"

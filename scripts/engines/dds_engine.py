@@ -165,13 +165,20 @@ class DDSEngine(SimulationEngine):
         if controller is not None:
             runner.set_controller(controller)
 
+        _read_count = [0]
         def read_state():
             samples = reader.take(N=100)
+            _read_count[0] += 1
             if samples:
                 latest = samples[-1]
                 state.qpos = np.array(latest.qpos, dtype=np.float64)
                 state.qvel = np.array(latest.qvel, dtype=np.float64)
                 state.time = latest.timestamp_ns * 1e-9
+                if _read_count[0] <= 5:
+                    print(f"[DDSEngine] read#{_read_count[0]}: got {len(samples)} samples")
+            else:
+                if _read_count[0] <= 5 or _read_count[0] % 500 == 0:
+                    print(f"[DDSEngine] read#{_read_count[0]}: EMPTY")
 
         def write_cmd(target_pos, kps, kds):
             writer.write(JointCommandDDS(
@@ -301,15 +308,15 @@ class DDSEngine(SimulationEngine):
                 active = _policy_enabled
 
             if active:
-                if not hasattr(self, '_first_step_dumped'):
-                    self._first_step_dumped = True
-                    print(f"\n[DDSEngine] FIRST STEP state:")
-                    print(f"  qpos[0:13]={np.round(state.qpos[:13], 4).tolist()}")
-                    print(f"  qvel[0:9]={np.round(state.qvel[:9], 4).tolist()}")
+                if not hasattr(self, '_active_tick'):
+                    self._active_tick = 0
+                self._active_tick += 1
                 target_pos, kps, kds = runner.step(state)
-                if not hasattr(self, '_first_cmd_dumped'):
-                    self._first_cmd_dumped = True
-                    print(f"  tgt[0:6]={np.round(target_pos[:6], 4).tolist()}")
+                if self._active_tick <= 10:
+                    print(f"[policy] tick={self._active_tick} "
+                          f"qpos[7:10]={np.round(state.qpos[7:10], 4).tolist()} "
+                          f"qvel[3:6]={np.round(state.qvel[3:6], 4).tolist()} "
+                          f"tgt[0:3]={np.round(target_pos[:3], 4).tolist()}")
                 write_cmd_fn(target_pos, kps, kds)
 
             elapsed = time.monotonic() - t0
