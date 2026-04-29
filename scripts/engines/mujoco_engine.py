@@ -259,17 +259,6 @@ def run_simulation(scene_xml, policy_runner, *, sim_dt, decimation,
                 state.time = data.time
                 target_pos, kps, kds = policy_runner.step(state)
 
-                if not hasattr(run_simulation, '_dumped'):
-                    run_simulation._dumped = True
-                    print(f"\n[mujoco] FIRST STEP obs dump:")
-                    print(f"[mujoco] root_pos={np.round(data.qpos[:3], 4).tolist()}")
-                    print(f"[mujoco] root_quat={np.round(data.qpos[3:7], 4).tolist()}")
-                    print(f"[mujoco] root_lin={np.round(data.qvel[:3], 4).tolist()}")
-                    print(f"[mujoco] root_ang={np.round(data.qvel[3:6], 4).tolist()}")
-                    print(f"[mujoco] jpos[0:6]={np.round(data.qpos[7:13], 4).tolist()}")
-                    print(f"[mujoco] qpos[0:13]={np.round(data.qpos[:13], 4).tolist()}")
-                    print(f"[mujoco] tgt[0:6]={np.round(target_pos[:6], 4).tolist()}")
-
             viewer.sync()
 
     print("\nSimulation ended.")
