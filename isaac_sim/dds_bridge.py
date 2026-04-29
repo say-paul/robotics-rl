@@ -58,6 +58,7 @@ def main():
     import omni.isaac.core.utils.stage as stage_utils
     from omni.isaac.core import World
     from omni.isaac.core.articulations import Articulation
+    from omni.isaac.core.utils.types import ArticulationAction
     from pxr import UsdPhysics
 
     try:
@@ -126,10 +127,12 @@ def main():
     # Build joint name remap (Isaac Sim order ↔ MuJoCo order)
     joint_names = [robot.dof_names[i] if i < len(robot.dof_names) else f"joint_{i}"
                    for i in range(n_dofs)]
+    # MuJoCo order: matches policy_parameters.hpp default_angles/kps/kds order.
+    # This is hip_pitch first, NOT hip_yaw first (despite the YAML joint_names).
     _MUJOCO_JOINTS = [
-        "left_hip_yaw_joint", "left_hip_roll_joint", "left_hip_pitch_joint",
+        "left_hip_pitch_joint", "left_hip_roll_joint", "left_hip_yaw_joint",
         "left_knee_joint", "left_ankle_pitch_joint", "left_ankle_roll_joint",
-        "right_hip_yaw_joint", "right_hip_roll_joint", "right_hip_pitch_joint",
+        "right_hip_pitch_joint", "right_hip_roll_joint", "right_hip_yaw_joint",
         "right_knee_joint", "right_ankle_pitch_joint", "right_ankle_roll_joint",
         "waist_yaw_joint", "waist_roll_joint", "waist_pitch_joint",
         "left_shoulder_pitch_joint", "left_shoulder_roll_joint",
@@ -144,6 +147,13 @@ def main():
         isim_to_mj = [_MUJOCO_JOINTS.index(name) for name in joint_names]
         mj_to_isim = [joint_names.index(name) for name in _MUJOCO_JOINTS]
         print(f"[bridge] Joint remap built ({n_dofs} joints)")
+        print(f"[bridge] IsaacSim[0]={joint_names[0]} -> MuJoCo[{isim_to_mj[0]}]={_MUJOCO_JOINTS[isim_to_mj[0]]}")
+        print(f"[bridge] MuJoCo[0]={_MUJOCO_JOINTS[0]} -> IsaacSim[{mj_to_isim[0]}]={joint_names[mj_to_isim[0]]}")
+        print(f"[bridge] da_mj[0:6]={da_mj[:6].tolist()}")
+        print(f"[bridge] _MUJOCO[0:6]={_MUJOCO_JOINTS[:6]}")
+        print(f"[bridge] IsaacSim joints: {joint_names}")
+        print(f"[bridge] isim_to_mj={isim_to_mj}")
+        print(f"[bridge] mj_to_isim={mj_to_isim}")
     except ValueError as e:
         print(f"[bridge] Joint name mismatch: {e}")
         print(f"[bridge] Isaac Sim joints: {joint_names}")
@@ -166,6 +176,30 @@ def main():
     running = True
     try:
         while running:
+            # Read commands FIRST (before stepping physics)
+            samples = command_reader.take(N=100)
+            if samples:
+                try:
+                    cmd = samples[-1]
+                    targets_mj = np.array(cmd.target_positions, dtype=np.float64)
+                    isim_targets = targets_mj[:29] - da_mj[:29]
+
+                    targets_isim = np.zeros(n_dofs, dtype=np.float32)
+                    for i in range(n_dofs):
+                        targets_isim[i] = isim_targets[isim_to_mj[i]]
+
+                    robot.apply_action(ArticulationAction(
+                        joint_positions=targets_isim))
+
+                    if step_count <= 3 or step_count % 250 == 0:
+                        print(f"[bridge] CMD raw_mj[0:6]={np.round(targets_mj[:6], 4).tolist()}")
+                        print(f"[bridge] CMD after_sub[0:6]={np.round(isim_targets[:6], 4).tolist()}")
+                        print(f"[bridge] CMD tgt_isim[0:6]={np.round(targets_isim[:6], 4).tolist()}")
+                except Exception as e:
+                    print(f"[bridge] CMD error: {e}")
+                    import traceback
+                    traceback.print_exc()
+
             # Step physics with decimation
             for _ in range(args.decimation):
                 world.step(render=False)
@@ -192,19 +226,6 @@ def main():
             state_writer.write(RobotStateDDS(
                 qpos=qpos.tolist(), qvel=qvel.tolist(),
                 timestamp_ns=int(time.time() * 1e9)))
-
-            # Read commands
-            samples = command_reader.take(N=100)
-            if samples:
-                cmd = samples[-1]
-                targets_mj = np.array(cmd.target_positions, dtype=np.float64)
-                isim_targets = targets_mj[:29] - da_mj[:29]
-
-                targets_isim = np.zeros(n_dofs, dtype=np.float64)
-                for i in range(n_dofs):
-                    targets_isim[i] = isim_targets[isim_to_mj[i]]
-
-                robot.set_joint_position_targets(targets_isim)
 
             if step_count == 1 or step_count % 250 == 0:
                 print(f"[bridge] step={step_count} z={root_pos[2]:.3f} "
