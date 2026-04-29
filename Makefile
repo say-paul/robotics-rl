@@ -49,6 +49,7 @@ isaac-push:
 
 isaac-deploy:
 	oc apply -f isaac_sim/k8s/namespace.yaml
+	oc apply -f isaac_sim/k8s/scc.yaml
 	oc apply -f isaac_sim/k8s/deployment.yaml
 	oc apply -f isaac_sim/k8s/service.yaml
 	oc apply -f isaac_sim/k8s/route.yaml
