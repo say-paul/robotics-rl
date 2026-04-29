@@ -268,11 +268,30 @@ def main():
     parser.add_argument("--cpu", action="store_true",
                         help="Use libx264 CPU encoder instead of NVENC")
     parser.add_argument("--shm", default=None,
-                        help="Shared memory name for velocity commands (auto-detect if not set)")
+                        help="Shared memory name for velocity commands")
+    parser.add_argument("--shm-auto", action="store_true",
+                        help="Auto-detect shared memory from /dev/shm")
     args = parser.parse_args()
 
     if args.shm:
         _init_shm(args.shm)
+    elif args.shm_auto:
+        # Auto-detect: wait for shared memory segments to appear in /dev/shm
+        print("[cmd] Waiting for shared memory segments...")
+        for _ in range(120):
+            shm_files = [f for f in os.listdir("/dev/shm") if f.startswith("psm_")]
+            if shm_files:
+                # The run_command output shm is typically the 2nd or 3rd created
+                # Try each one — the right one will have run_command data
+                for name in sorted(shm_files):
+                    _init_shm(name)
+                    if _shm_writer:
+                        break
+                if _shm_writer:
+                    break
+            time.sleep(5)
+        if not _shm_writer:
+            print("[cmd] No shared memory found after 10 minutes")
 
     threading.Thread(target=lambda: ThreadingHTTPServer(
         ("0.0.0.0", LISTEN_PORT), HlsHandler).serve_forever(),

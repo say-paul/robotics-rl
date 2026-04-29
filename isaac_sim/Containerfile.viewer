@@ -18,5 +18,4 @@ COPY zmq_to_hls.py /app/zmq_to_hls.py
 WORKDIR /app
 EXPOSE 8090
 
-ENTRYPOINT ["python", "zmq_to_hls.py", "--host", "localhost", "--cpu"]
-# On cluster: add --shm <name> to enable velocity commands via shared memory
+ENTRYPOINT ["python", "zmq_to_hls.py", "--host", "localhost", "--cpu", "--shm-auto"]
