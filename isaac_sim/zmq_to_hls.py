@@ -46,7 +46,7 @@ video{flex:1;object-fit:contain;background:#111}
 <div id="hud">Connecting...</div>
 <video id="v" autoplay muted playsinline></video>
 <div id="vel">vx=0.0 vy=0.0 yaw=0.0</div>
-<div id="help">Tap a direction to start moving. Tap again to go faster. Press X to stop.</div>
+<div id="help">Press a direction to move. Press X to stop. Press C to switch camera.</div>
 <div id="controls">
 <span class="key" data-key="w">W fwd</span>
 <span class="key" data-key="s">S back</span>
@@ -137,17 +137,17 @@ def _write_shm(data_dict):
 def _handle_key(key):
     v = _velocity
     if key == "w":
-        v["vx"] = min(v["vx"] + 0.1, 1.0)
+        v["vx"] = 0.75
     elif key == "s":
-        v["vx"] = max(v["vx"] - 0.1, -0.6)
+        v["vx"] = -0.5
     elif key == "a":
-        v["vyaw"] = min(v["vyaw"] + 0.2, 1.57)
+        v["vyaw"] = 1.0
     elif key == "d":
-        v["vyaw"] = max(v["vyaw"] - 0.2, -1.57)
+        v["vyaw"] = -1.0
     elif key == "q":
-        v["vy"] = min(v["vy"] + 0.1, 0.5)
+        v["vy"] = 0.4
     elif key == "e":
-        v["vy"] = max(v["vy"] - 0.1, -0.5)
+        v["vy"] = -0.4
     elif key == "x":
         v["vx"], v["vy"], v["vyaw"] = 0.0, 0.0, 0.0
 
