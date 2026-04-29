@@ -91,12 +91,24 @@ def _init_shm(shm_name):
     global _shm_writer
     if shm_name:
         try:
-            sys.path.insert(0, "/opt/unitree_sim")
-            from dds.sharedmemorymanager import SharedMemoryManager
-            _shm_writer = SharedMemoryManager(shm_name)
+            from multiprocessing import shared_memory
+            shm = shared_memory.SharedMemory(name=shm_name)
+            _shm_writer = shm
             print(f"[cmd] Connected to shared memory: {shm_name}")
         except Exception as e:
             print(f"[cmd] Shared memory not available: {e}")
+
+
+def _write_shm(data_dict):
+    """Write JSON data to shared memory in unitree_sim format."""
+    if not _shm_writer:
+        return
+    import struct
+    json_str = json.dumps(data_dict)
+    json_bytes = json_str.encode("utf-8")
+    timestamp = int(time.time()) & 0xFFFFFFFF
+    buf = struct.pack("I", timestamp) + struct.pack("I", len(json_bytes)) + json_bytes
+    _shm_writer.buf[:len(buf)] = buf
 
 
 def _handle_key(key):
@@ -117,8 +129,7 @@ def _handle_key(key):
         v["vx"], v["vy"], v["vyaw"] = 0.0, 0.0, 0.0
 
     cmd = f'[{v["vx"]:.2f}, {v["vy"]:.2f}, {v["vyaw"]:.2f}, {v["height"]:.2f}]'
-    if _shm_writer:
-        _shm_writer.write_data({"run_command": cmd})
+    _write_shm({"run_command": cmd})
     return v
 
 
