@@ -287,19 +287,16 @@ def main():
     if args.shm:
         _init_shm(args.shm)
     elif args.shm_auto:
-        # Auto-detect: wait for shared memory segments to appear in /dev/shm
-        print("[cmd] Waiting for shared memory segments...")
+        # Auto-detect: wait for the sim to write the shm name to a known file
+        print("[cmd] Waiting for shared memory name...")
+        shm_name_file = "/dev/shm/run_command_shm_name"
         for _ in range(120):
-            shm_files = [f for f in os.listdir("/dev/shm") if f.startswith("psm_")]
-            if shm_files:
-                # The run_command output shm is typically the 2nd or 3rd created
-                # Try each one — the right one will have run_command data
-                for name in sorted(shm_files):
+            if os.path.isfile(shm_name_file):
+                name = open(shm_name_file).read().strip()
+                if name:
                     _init_shm(name)
                     if _shm_writer:
                         break
-                if _shm_writer:
-                    break
             time.sleep(5)
         if not _shm_writer:
             print("[cmd] No shared memory found after 10 minutes")

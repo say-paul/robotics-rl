@@ -36,7 +36,22 @@ elif [ ! -f "$SDK_LIB/crc_amd64.so" ]; then
     echo "[entrypoint] Warning: CRC .so not found. Mount GR00T-WBC at /groot or bake into image."
 fi
 
+# Write run_command shm name to a file the viewer sidecar can read
+# (both containers share /dev/shm via the dshm volume)
 echo "[entrypoint] Starting G1 wholebody simulation..."
+# The shm name will be written by a background watcher after DDS init
+(while true; do
+    SHM=$(grep -o 'psm_[a-f0-9]*' /proc/1/fd/1 2>/dev/null | tail -1)
+    if [ -n "$SHM" ]; then
+        # Find the run_command output shm name from logs
+        RUN_CMD_SHM=$(grep 'run_command_dds.*Output shared memory' /proc/1/fd/1 2>/dev/null | grep -o 'psm_[a-f0-9]*')
+        if [ -n "$RUN_CMD_SHM" ]; then
+            echo "$RUN_CMD_SHM" > /dev/shm/run_command_shm_name
+            break
+        fi
+    fi
+    sleep 5
+done) &
 cd /opt/unitree_sim && exec /isaac-sim/python.sh sim_main.py \
     --task Isaac-Move-Cylinder-G129-Dex1-Wholebody \
     --action_source dds_wholebody \
