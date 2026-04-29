@@ -45,6 +45,11 @@ rm -f /dev/shm/psm_* 2>/dev/null
 sed -i 's/height: int = 480/height: int = 720/g; s/width: int =  640/width: int = 1280/g; s/height=480/height=720/g; s/width=640/width=1280/g' \
     /opt/unitree_sim/tasks/common_config/camera_configs.py 2>/dev/null
 
+# Replace right_wrist_camera with world_camera in the shared memory writer
+# so the teleimager publishes the third-person view on port 55557
+sed -i 's/right_wrist_camera/world_camera/g' \
+    /opt/unitree_sim/tasks/common_observations/camera_state.py 2>/dev/null
+
 echo "[entrypoint] Starting G1 wholebody simulation..."
 # The shm name will be written by a background watcher after DDS init
 (while true; do
@@ -68,5 +73,5 @@ cd /opt/unitree_sim && exec /isaac-sim/python.sh sim_main.py \
     --headless \
     --enable_cameras \
     --camera_jpeg_quality 95 \
-    --camera_include "front_camera,left_wrist_camera,right_wrist_camera" \
+    --camera_include "front_camera,right_wrist_camera" \
     "$@"
