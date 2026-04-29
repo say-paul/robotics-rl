@@ -108,7 +108,13 @@ def _write_shm(data_dict):
     json_bytes = json_str.encode("utf-8")
     timestamp = int(time.time()) & 0xFFFFFFFF
     buf = struct.pack("I", timestamp) + struct.pack("I", len(json_bytes)) + json_bytes
-    _shm_writer.buf[:len(buf)] = buf
+    writers = _shm_writer if isinstance(_shm_writer, list) else [_shm_writer]
+    for w in writers:
+        try:
+            if len(buf) <= w.size:
+                w.buf[:len(buf)] = buf
+        except Exception:
+            pass
 
 
 def _handle_key(key):
@@ -287,19 +293,29 @@ def main():
     if args.shm:
         _init_shm(args.shm)
     elif args.shm_auto:
-        # Auto-detect: wait for the sim to write the shm name to a known file
-        print("[cmd] Waiting for shared memory name...")
-        shm_name_file = "/dev/shm/run_command_shm_name"
-        for _ in range(120):
-            if os.path.isfile(shm_name_file):
-                name = open(shm_name_file).read().strip()
-                if name:
-                    _init_shm(name)
-                    if _shm_writer:
-                        break
-            time.sleep(5)
-        if not _shm_writer:
-            print("[cmd] No shared memory found after 10 minutes")
+        def _shm_auto_connect():
+            from multiprocessing import shared_memory
+            print("[cmd] Watching for shared memory (background)...")
+            for _ in range(360):
+                try:
+                    shm_files = [f for f in os.listdir("/dev/shm") if f.startswith("psm_")]
+                except OSError:
+                    shm_files = []
+                if shm_files:
+                    global _shm_writer
+                    writers = []
+                    for name in shm_files:
+                        try:
+                            writers.append(shared_memory.SharedMemory(name=name))
+                        except Exception:
+                            pass
+                    if writers:
+                        _shm_writer = writers
+                        print(f"[cmd] Attached to {len(writers)} shared memory segments")
+                        return
+                time.sleep(5)
+            print("[cmd] Shared memory not found after 30 minutes")
+        threading.Thread(target=_shm_auto_connect, daemon=True).start()
 
     threading.Thread(target=lambda: ThreadingHTTPServer(
         ("0.0.0.0", LISTEN_PORT), HlsHandler).serve_forever(),

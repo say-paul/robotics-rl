@@ -38,6 +38,9 @@ fi
 
 # Write run_command shm name to a file the viewer sidecar can read
 # (both containers share /dev/shm via the dshm volume)
+# Clean stale shared memory from previous runs
+rm -f /dev/shm/psm_* 2>/dev/null
+
 echo "[entrypoint] Starting G1 wholebody simulation..."
 # The shm name will be written by a background watcher after DDS init
 (while true; do
