@@ -116,10 +116,17 @@ def zmq_receiver(host, port):
             time.sleep(1)
 
 
-def ffmpeg_writer():
+def ffmpeg_writer(cpu=False):
     os.makedirs(HLS_DIR, exist_ok=True)
     for f in os.listdir(HLS_DIR):
         os.remove(os.path.join(HLS_DIR, f))
+
+    if cpu:
+        encoder_args = ["-c:v", "libx264", "-preset", "ultrafast",
+                        "-tune", "zerolatency", "-b:v", "2M"]
+    else:
+        encoder_args = ["-c:v", "h264_nvenc", "-preset", "p4",
+                        "-tune", "ll", "-b:v", "4M"]
 
     cmd = [
         "ffmpeg", "-y",
@@ -128,10 +135,7 @@ def ffmpeg_writer():
         "-codec:v", "mjpeg",
         "-framerate", str(TARGET_FPS),
         "-i", "pipe:0",
-        "-c:v", "h264_nvenc",
-        "-preset", "p4",
-        "-tune", "ll",
-        "-b:v", "4M",
+        *encoder_args,
         "-g", "30",
         "-keyint_min", "30",
         "-f", "hls",
@@ -165,6 +169,8 @@ def main():
     parser = argparse.ArgumentParser(description="ZMQ camera to HLS")
     parser.add_argument("--host", default="localhost")
     parser.add_argument("--port", type=int, default=55555)
+    parser.add_argument("--cpu", action="store_true",
+                        help="Use libx264 CPU encoder instead of NVENC")
     args = parser.parse_args()
 
     threading.Thread(target=lambda: ThreadingHTTPServer(
@@ -172,7 +178,7 @@ def main():
         daemon=True).start()
     print(f"[hls] Server at http://localhost:{LISTEN_PORT}")
 
-    threading.Thread(target=ffmpeg_writer, daemon=True).start()
+    threading.Thread(target=lambda: ffmpeg_writer(cpu=args.cpu), daemon=True).start()
     zmq_receiver(args.host, args.port)
 
 

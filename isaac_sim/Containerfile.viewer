@@ -1,0 +1,21 @@
+# This project was developed with assistance from AI tools.
+#
+# Lightweight HLS viewer sidecar. Subscribes to Isaac Sim's ZMQ
+# camera stream and serves HLS via HTTP.
+#
+# Build:  make viewer-build
+# Runs as sidecar in the sim pod (localhost ZMQ).
+
+FROM python:3.11-slim
+
+RUN apt-get update -qq && \
+    apt-get install -y -qq ffmpeg && \
+    apt-get clean && \
+    pip install --no-cache-dir pyzmq
+
+COPY zmq_to_hls.py /app/zmq_to_hls.py
+
+WORKDIR /app
+EXPOSE 8090
+
+ENTRYPOINT ["python", "zmq_to_hls.py", "--host", "localhost", "--cpu"]

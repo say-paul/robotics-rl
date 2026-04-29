@@ -26,13 +26,14 @@ find /opt/unitree_sim /isaac-sim/kit -path "*/unitree_sdk2py/core/channel.py" 2>
     sed -i 's/pass  # patched: skip Domain, use DomainParticipant only/self.__domain = Domain(id, config)/' "$f" 2>/dev/null
 done
 
-# Copy missing .so files for unitree_sdk2py CRC
+# Copy missing .so files for unitree_sdk2py CRC (from /groot if mounted, skip otherwise)
 SDK_LIB="/isaac-sim/kit/python/lib/python3.11/site-packages/unitree_sdk2py/utils/lib"
 if [ -d "/groot/external_dependencies/unitree_sdk2_python/unitree_sdk2py/utils/lib" ]; then
     mkdir -p "$SDK_LIB"
     cp -f /groot/external_dependencies/unitree_sdk2_python/unitree_sdk2py/utils/lib/*.so "$SDK_LIB/"
-    echo "[entrypoint] Copied CRC .so to $SDK_LIB/"
-    ls "$SDK_LIB/"
+    echo "[entrypoint] Copied CRC .so from /groot"
+elif [ ! -f "$SDK_LIB/crc_amd64.so" ]; then
+    echo "[entrypoint] Warning: CRC .so not found. Mount GR00T-WBC at /groot or bake into image."
 fi
 
 echo "[entrypoint] Starting G1 wholebody simulation..."

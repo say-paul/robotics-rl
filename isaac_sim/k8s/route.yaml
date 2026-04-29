@@ -1,0 +1,16 @@
+apiVersion: route.openshift.io/v1
+kind: Route
+metadata:
+  name: g1-viewer
+  namespace: robotics-rl
+  annotations:
+    haproxy.router.openshift.io/timeout: 1h
+spec:
+  to:
+    kind: Service
+    name: g1-viewer
+  port:
+    targetPort: hls
+  tls:
+    termination: edge
+    insecureEdgeTerminationPolicy: Redirect
