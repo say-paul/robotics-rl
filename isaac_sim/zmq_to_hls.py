@@ -11,9 +11,11 @@ Usage:
 """
 
 import argparse
+import json
 import os
 import queue
 import subprocess
+import sys
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -27,29 +29,123 @@ TARGET_FPS = 30
 _frame_queue = queue.Queue(maxsize=4)
 
 _INDEX_HTML = b"""<!DOCTYPE html>
-<html><head><meta charset="utf-8"><title>Isaac Sim</title>
-<style>*{margin:0;padding:0}body{background:#1e1e1e;display:flex;align-items:center;justify-content:center;height:100vh}
-video{max-width:100%;max-height:100vh;object-fit:contain}
-#s{position:fixed;top:10px;left:10px;color:#888;font:14px monospace}</style></head>
-<body><div id="s">Connecting...</div><video id="v" autoplay muted playsinline></video>
+<html><head><meta charset="utf-8"><title>G1 Sim</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{background:#1e1e1e;color:#ccc;font:14px monospace;display:flex;flex-direction:column;height:100vh}
+video{flex:1;object-fit:contain;background:#111}
+#hud{position:fixed;top:10px;left:10px;color:#888}
+#controls{display:flex;justify-content:center;gap:8px;padding:8px;background:#2a2a2a}
+#controls .key{padding:8px 14px;background:#444;border:1px solid #666;border-radius:4px;cursor:pointer;user-select:none}
+#controls .key:hover{background:#555}
+#controls .key.active{background:#4a7;color:#fff}
+#vel{position:fixed;bottom:50px;left:10px;color:#6f6}
+</style></head>
+<body>
+<div id="hud">Connecting...</div>
+<video id="v" autoplay muted playsinline></video>
+<div id="vel">vx=0.0 vy=0.0 yaw=0.0</div>
+<div id="controls">
+<span class="key" data-key="w">W fwd</span>
+<span class="key" data-key="s">S back</span>
+<span class="key" data-key="a">A left</span>
+<span class="key" data-key="d">D right</span>
+<span class="key" data-key="q">Q strafe-L</span>
+<span class="key" data-key="e">E strafe-R</span>
+<span class="key" data-key="x">X stop</span>
+</div>
 <script src="https://cdn.jsdelivr.net/npm/hls.js@latest"></script>
 <script>
-const u='/hls/stream.m3u8',v=document.getElementById('v'),s=document.getElementById('s');
+const u='/hls/stream.m3u8',v=document.getElementById('v'),hud=document.getElementById('hud');
 if(Hls.isSupported()){const h=new Hls({liveSyncDurationCount:2,liveMaxLatencyDurationCount:5,
 liveDurationInfinity:true,lowLatencyMode:false,enableWorker:true,backBufferLength:0});
-h.loadSource(u);h.attachMedia(v);h.on(Hls.Events.MANIFEST_PARSED,()=>{s.textContent='Playing';v.play()});
-h.on(Hls.Events.ERROR,(_,d)=>{s.textContent='Error: '+d.details;if(d.fatal){
+h.loadSource(u);h.attachMedia(v);h.on(Hls.Events.MANIFEST_PARSED,()=>{hud.textContent='Playing';v.play()});
+h.on(Hls.Events.ERROR,(_,d)=>{hud.textContent='Error: '+d.details;if(d.fatal){
 if(d.type===Hls.ErrorTypes.NETWORK_ERROR)h.startLoad();
 else if(d.type===Hls.ErrorTypes.MEDIA_ERROR)h.recoverMediaError()}})}
 else if(v.canPlayType('application/vnd.apple.mpegurl')){v.src=u;
-v.addEventListener('playing',()=>{s.textContent='Playing'})}
-else{s.textContent='HLS not supported'}
+v.addEventListener('playing',()=>{hud.textContent='Playing'})}
+
+function send(key){
+  fetch('/cmd',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({key:key})}).then(r=>r.json()).then(d=>{
+    document.getElementById('vel').textContent=
+      'vx='+d.vx.toFixed(1)+' vy='+d.vy.toFixed(1)+' yaw='+d.vyaw.toFixed(1)});
+}
+document.addEventListener('keydown',e=>{
+  const k=e.key.toLowerCase();
+  if('wsadqex'.includes(k))send(k);
+});
+document.querySelectorAll('.key').forEach(el=>{
+  el.addEventListener('click',()=>send(el.dataset.key));
+});
 </script></body></html>"""
+
+
+_velocity = {"vx": 0.0, "vy": 0.0, "vyaw": 0.0, "height": 0.8}
+_shm_writer = None
+
+
+def _init_shm(shm_name):
+    """Connect to the sim's run_command shared memory."""
+    global _shm_writer
+    if shm_name:
+        try:
+            sys.path.insert(0, "/opt/unitree_sim")
+            from dds.sharedmemorymanager import SharedMemoryManager
+            _shm_writer = SharedMemoryManager(shm_name)
+            print(f"[cmd] Connected to shared memory: {shm_name}")
+        except Exception as e:
+            print(f"[cmd] Shared memory not available: {e}")
+
+
+def _handle_key(key):
+    v = _velocity
+    if key == "w":
+        v["vx"] = min(v["vx"] + 0.1, 1.0)
+    elif key == "s":
+        v["vx"] = max(v["vx"] - 0.1, -0.6)
+    elif key == "a":
+        v["vyaw"] = min(v["vyaw"] + 0.2, 1.57)
+    elif key == "d":
+        v["vyaw"] = max(v["vyaw"] - 0.2, -1.57)
+    elif key == "q":
+        v["vy"] = min(v["vy"] + 0.1, 0.5)
+    elif key == "e":
+        v["vy"] = max(v["vy"] - 0.1, -0.5)
+    elif key == "x":
+        v["vx"], v["vy"], v["vyaw"] = 0.0, 0.0, 0.0
+
+    cmd = f'[{v["vx"]:.2f}, {v["vy"]:.2f}, {v["vyaw"]:.2f}, {v["height"]:.2f}]'
+    if _shm_writer:
+        _shm_writer.write_data({"run_command": cmd})
+    return v
 
 
 class HlsHandler(BaseHTTPRequestHandler):
     def log_message(self, format, *args):
         return
+
+    def do_POST(self):
+        if self.path == "/cmd":
+            length = int(self.headers.get("Content-Length", 0))
+            body = json.loads(self.rfile.read(length)) if length else {}
+            result = _handle_key(body.get("key", ""))
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Access-Control-Allow-Origin", "*")
+            self.end_headers()
+            self.wfile.write(json.dumps(result).encode())
+            return
+        self.send_response(404)
+        self.end_headers()
+
+    def do_OPTIONS(self):
+        self.send_response(204)
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+        self.send_header("Access-Control-Allow-Headers", "Content-Type")
+        self.end_headers()
 
     def do_GET(self):
         path = self.path.split("?")[0]
@@ -171,7 +267,12 @@ def main():
     parser.add_argument("--port", type=int, default=55555)
     parser.add_argument("--cpu", action="store_true",
                         help="Use libx264 CPU encoder instead of NVENC")
+    parser.add_argument("--shm", default=None,
+                        help="Shared memory name for velocity commands (auto-detect if not set)")
     args = parser.parse_args()
+
+    if args.shm:
+        _init_shm(args.shm)
 
     threading.Thread(target=lambda: ThreadingHTTPServer(
         ("0.0.0.0", LISTEN_PORT), HlsHandler).serve_forever(),

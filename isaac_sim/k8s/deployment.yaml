@@ -49,6 +49,9 @@ spec:
           ports:
             - containerPort: 8090
               name: hls
+          volumeMounts:
+            - name: dshm
+              mountPath: /dev/shm
           resources:
             limits:
               memory: 1Gi
