@@ -356,7 +356,7 @@ def main():
     parser = argparse.ArgumentParser(description="ZMQ camera to HLS")
     parser.add_argument("--host", default="localhost")
     parser.add_argument("--port", type=int, default=55555)
-    parser.add_argument("--cameras", default="front:55555,world:55556",
+    parser.add_argument("--cameras", default="head:55555,left-wrist:55556,right-wrist:55557",
                         help="Comma-separated name:port pairs for available cameras")
     parser.add_argument("--cpu", action="store_true",
                         help="Use libx264 CPU encoder instead of NVENC")

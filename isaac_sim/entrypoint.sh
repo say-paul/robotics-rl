@@ -68,6 +68,5 @@ cd /opt/unitree_sim && exec /isaac-sim/python.sh sim_main.py \
     --headless \
     --enable_cameras \
     --camera_jpeg_quality 95 \
-    --camera_include "front_camera,world_camera" \
-    --camera_exclude "" \
+    --camera_include "front_camera,left_wrist_camera,right_wrist_camera" \
     "$@"
