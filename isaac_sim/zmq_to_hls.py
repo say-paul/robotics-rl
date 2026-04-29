@@ -243,7 +243,7 @@ def ffmpeg_writer(cpu=False):
 
     if cpu:
         encoder_args = ["-c:v", "libx264", "-preset", "ultrafast",
-                        "-tune", "zerolatency", "-b:v", "2M"]
+                        "-tune", "zerolatency", "-b:v", "4M"]
     else:
         encoder_args = ["-c:v", "h264_nvenc", "-preset", "p4",
                         "-tune", "ll", "-b:v", "4M"]
