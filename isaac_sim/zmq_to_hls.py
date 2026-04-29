@@ -46,7 +46,7 @@ video{flex:1;object-fit:contain;background:#111}
 <div id="hud">Connecting...</div>
 <video id="v" autoplay muted playsinline></video>
 <div id="vel">vx=0.0 vy=0.0 yaw=0.0</div>
-<div id="help">Press a direction to move. Press X to stop. Press C to switch camera.</div>
+<div id="help">Tap a direction to move. Press X to stop. Press C to switch camera.</div>
 <div id="controls">
 <span class="key" data-key="w">W fwd</span>
 <span class="key" data-key="s">S back</span>
