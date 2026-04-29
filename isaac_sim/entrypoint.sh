@@ -63,4 +63,5 @@ cd /opt/unitree_sim && exec /isaac-sim/python.sh sim_main.py \
     --enable_wholebody_dds \
     --headless \
     --enable_cameras \
+    --camera_jpeg_quality 95 \
     "$@"
