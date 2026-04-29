@@ -35,6 +35,7 @@ _INDEX_HTML = b"""<!DOCTYPE html>
 body{background:#1e1e1e;color:#ccc;font:14px monospace;display:flex;flex-direction:column;height:100vh}
 video{flex:1;object-fit:contain;background:#111}
 #hud{position:fixed;top:10px;left:10px;color:#888}
+#help{text-align:center;padding:6px;color:#999;font-size:12px;background:#252525}
 #controls{display:flex;justify-content:center;gap:8px;padding:8px;background:#2a2a2a}
 #controls .key{padding:8px 14px;background:#444;border:1px solid #666;border-radius:4px;cursor:pointer;user-select:none}
 #controls .key:hover{background:#555}
@@ -45,6 +46,7 @@ video{flex:1;object-fit:contain;background:#111}
 <div id="hud">Connecting...</div>
 <video id="v" autoplay muted playsinline></video>
 <div id="vel">vx=0.0 vy=0.0 yaw=0.0</div>
+<div id="help">Tap a direction to start moving. Tap again to go faster. Press X to stop.</div>
 <div id="controls">
 <span class="key" data-key="w">W fwd</span>
 <span class="key" data-key="s">S back</span>
