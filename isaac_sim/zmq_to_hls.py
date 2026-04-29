@@ -134,9 +134,16 @@ def _handle_key(key):
     elif key == "x":
         v["vx"], v["vy"], v["vyaw"] = 0.0, 0.0, 0.0
 
-    cmd = f'[{v["vx"]:.2f}, {v["vy"]:.2f}, {v["vyaw"]:.2f}, {v["height"]:.2f}]'
-    _write_shm({"run_command": cmd})
     return v
+
+
+def _velocity_writer():
+    """Continuously write current velocity to shared memory at 100 Hz."""
+    while True:
+        v = _velocity
+        cmd = f'[{v["vx"]:.2f}, {v["vy"]:.2f}, {v["vyaw"]:.2f}, {v["height"]:.2f}]'
+        _write_shm({"run_command": cmd})
+        time.sleep(0.01)
 
 
 class HlsHandler(BaseHTTPRequestHandler):
@@ -320,6 +327,7 @@ def main():
     threading.Thread(target=lambda: ThreadingHTTPServer(
         ("0.0.0.0", LISTEN_PORT), HlsHandler).serve_forever(),
         daemon=True).start()
+    threading.Thread(target=_velocity_writer, daemon=True).start()
     print(f"[hls] Server at http://localhost:{LISTEN_PORT}")
 
     threading.Thread(target=lambda: ffmpeg_writer(cpu=args.cpu), daemon=True).start()
