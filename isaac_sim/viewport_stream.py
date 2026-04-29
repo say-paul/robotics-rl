@@ -104,9 +104,7 @@ def _ffmpeg_stderr_reader() -> None:
     if proc is None or proc.stderr is None:
         return
     for line in proc.stderr:
-        text = line.decode("utf-8", errors="replace").rstrip()
-        if text:
-            print(f"[stream] ffmpeg: {text}", flush=True)
+        pass
 
 
 def _find_camera_prim() -> str:
@@ -215,9 +213,7 @@ def _writer_loop() -> None:
             _ffmpeg_proc.stdin.flush()
             _frame_count += 1
             if _frame_count == 1:
-                print(f"[stream] first frame written ({len(raw)} bytes)", flush=True)
-            elif _frame_count % 300 == 0:
-                print(f"[stream] {_frame_count} frames encoded", flush=True)
+                print(f"[stream] first frame written", flush=True)
         except (BrokenPipeError, OSError):
             print("[stream] ffmpeg pipe broken, restarting", flush=True)
             with _ffmpeg_lock:

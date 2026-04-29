@@ -411,7 +411,7 @@ interfaces:
       state: "rt/g1/state"
       command: "rt/g1/command"
     qos: best_effort
-    unitree_compat: true
+    unitree_compat: false  # true = Unitree SDK DDS (rt/lowstate), false = RDP custom types
 
   - name: "mqtt_mission_cloud"
     type: "network"

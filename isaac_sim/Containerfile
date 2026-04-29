@@ -1,0 +1,29 @@
+# This project was developed with assistance from AI tools.
+#
+# Build:  make isaac-build
+# Run:    make isaac-run
+
+FROM nvcr.io/nvidia/isaac-sim:5.1.0
+
+ENV ACCEPT_EULA=Y
+USER root
+
+# Build CycloneDDS C library (needed by unitree_sdk2py)
+RUN apt-get update -qq && apt-get install -y -qq cmake build-essential git iproute2 && \
+    git clone --depth 1 -b releases/0.10.x https://github.com/eclipse-cyclonedds/cyclonedds /tmp/cyclonedds && \
+    mkdir /tmp/cyclonedds/build && cd /tmp/cyclonedds/build && \
+    cmake .. -DCMAKE_INSTALL_PREFIX=/opt/cyclonedds && \
+    cmake --build . --target install -j$(nproc) && \
+    rm -rf /tmp/cyclonedds && \
+    apt-get clean
+
+ENV CYCLONEDDS_HOME=/opt/cyclonedds
+
+# Pre-install Python deps
+RUN ./python.sh -m pip install --no-cache-dir cyclonedds tyro pin
+
+COPY --chmod=755 entrypoint.sh /entrypoint.sh
+
+EXPOSE 8090
+
+ENTRYPOINT ["/entrypoint.sh"]

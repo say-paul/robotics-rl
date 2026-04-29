@@ -301,7 +301,15 @@ class DDSEngine(SimulationEngine):
                 active = _policy_enabled
 
             if active:
+                if not hasattr(self, '_first_step_dumped'):
+                    self._first_step_dumped = True
+                    print(f"\n[DDSEngine] FIRST STEP state:")
+                    print(f"  qpos[0:13]={np.round(state.qpos[:13], 4).tolist()}")
+                    print(f"  qvel[0:9]={np.round(state.qvel[:9], 4).tolist()}")
                 target_pos, kps, kds = runner.step(state)
+                if not hasattr(self, '_first_cmd_dumped'):
+                    self._first_cmd_dumped = True
+                    print(f"  tgt[0:6]={np.round(target_pos[:6], 4).tolist()}")
                 write_cmd_fn(target_pos, kps, kds)
 
             elapsed = time.monotonic() - t0
