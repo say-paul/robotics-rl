@@ -15,6 +15,10 @@ spec:
     spec:
       nodeSelector:
         nvidia.com/gpu.product: NVIDIA-L40S
+      tolerations:
+        - key: nvidia.com/gpu
+          operator: Exists
+          effect: NoSchedule
       containers:
         - name: sim
           image: quay.io/jary/rdp-isaac-sim:latest
@@ -33,9 +37,13 @@ spec:
               memory: 8Gi
               cpu: "2"
           securityContext:
+            runAsNonRoot: true
+            allowPrivilegeEscalation: false
+            seccompProfile:
+              type: RuntimeDefault
             capabilities:
-              add:
-                - NET_ADMIN
+              drop:
+                - ALL
           volumeMounts:
             - name: dshm
               mountPath: /dev/shm
@@ -45,6 +53,14 @@ spec:
           ports:
             - containerPort: 8090
               name: hls
+          securityContext:
+            runAsNonRoot: true
+            allowPrivilegeEscalation: false
+            seccompProfile:
+              type: RuntimeDefault
+            capabilities:
+              drop:
+                - ALL
           resources:
             limits:
               memory: 1Gi
