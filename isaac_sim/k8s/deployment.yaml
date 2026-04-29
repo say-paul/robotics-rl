@@ -5,6 +5,8 @@ metadata:
   namespace: robotics-rl
 spec:
   replicas: 1
+  strategy:
+    type: Recreate
   selector:
     matchLabels:
       app: g1-sim
