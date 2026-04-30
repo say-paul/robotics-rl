@@ -142,6 +142,17 @@ cd "$PROJECT_DIR"
 echo ""
 echo "Installing RDP..."
 pip install -r requirements.txt
+
+if command -v nvidia-smi &> /dev/null; then
+    echo "NVIDIA GPU detected — installing GPU acceleration..."
+    pip install -q onnxruntime-gpu nvidia-cudnn-cu12
+
+    CUDNN_LIB="$PROJECT_DIR/$VENV_DIR/lib/python$(python3 -c 'import sys;print(f"{sys.version_info.major}.{sys.version_info.minor}")')/site-packages/nvidia/cudnn/lib"
+    if [ -d "$CUDNN_LIB" ] && ! grep -q "nvidia/cudnn" "$VENV_ACTIVATE" 2>/dev/null; then
+        echo "export LD_LIBRARY_PATH=\"$CUDNN_LIB:\$LD_LIBRARY_PATH\"" >> "$VENV_ACTIVATE"
+        echo "cuDNN library path added to venv activate script."
+    fi
+fi
 echo "Done."
 
 # --- GR00T model ---

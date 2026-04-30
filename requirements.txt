@@ -3,5 +3,9 @@ PyYAML>=5.4
 mujoco>=3.0.0
 onnxruntime>=1.15.0
 
+# GPU acceleration (install manually if NVIDIA GPU available):
+#   pip install onnxruntime-gpu nvidia-cudnn-cu12
+# The install scripts detect GPU and configure LD_LIBRARY_PATH automatically.
+
 # Optional: model download from HuggingFace
 # huggingface-hub>=0.16.0

@@ -141,6 +141,46 @@ def download_from_isaac_groot(version="n1.6", target_dir="models/groot"):
         sys.exit(1)
 
 
+def download_sonic_models(target_dir="models/sonic_wbc"):
+    """Download GEAR-SONIC WBC models from HuggingFace."""
+    try:
+        from huggingface_hub import snapshot_download
+    except ImportError:
+        print("ERROR: huggingface_hub not installed")
+        print("Install with: pip install huggingface-hub")
+        sys.exit(1)
+
+    repo_id = "nvidia/GEAR-SONIC"
+    print(f"Downloading GEAR-SONIC models from HuggingFace: {repo_id}")
+
+    target_path = Path(target_dir)
+    target_path.mkdir(parents=True, exist_ok=True)
+
+    token = os.environ.get("HF_TOKEN")
+
+    try:
+        local_dir = snapshot_download(
+            repo_id=repo_id,
+            local_dir=str(target_path),
+            local_dir_use_symlinks=False,
+            resume_download=True,
+            token=token,
+        )
+        print(f"Downloaded to: {local_dir}")
+
+        onnx_files = list(Path(local_dir).rglob("*.onnx"))
+        print(f"\nONNX models found: {len(onnx_files)}")
+        for f in onnx_files:
+            size_mb = f.stat().st_size / (1024 * 1024)
+            print(f"  - {f.relative_to(local_dir)} ({size_mb:.1f} MB)")
+
+        return local_dir
+
+    except Exception as e:
+        print(f"Download failed: {e}")
+        sys.exit(1)
+
+
 def verify_models(model_dir):
     """
     Verify downloaded models are valid ONNX files.
@@ -212,6 +252,17 @@ def main():
         help="Target directory for models"
     )
     parser.add_argument(
+        "--sonic",
+        action="store_true",
+        help="Download GEAR-SONIC WBC models (encoder, decoder, planner)"
+    )
+    parser.add_argument(
+        "--sonic-dir",
+        type=str,
+        default="models/sonic_wbc",
+        help="Target directory for SONIC models (default: models/sonic_wbc)"
+    )
+    parser.add_argument(
         "--verify",
         action="store_true",
         help="Verify downloaded ONNX models"
@@ -219,34 +270,49 @@ def main():
 
     args = parser.parse_args()
 
-    print("=" * 60)
-    print(f"GR00T Model Downloader")
-    print("=" * 60)
-    print(f"Version: {args.version.upper()}")
-    print(f"Source:  {args.source}")
-    print(f"Target:  {args.target_dir}")
-    print("=" * 60)
-    print()
+    # Load HF_TOKEN from .env if not already in environment
+    if not os.environ.get("HF_TOKEN"):
+        env_file = Path(__file__).resolve().parent.parent / ".env"
+        if env_file.is_file():
+            for line in env_file.read_text().splitlines():
+                line = line.strip()
+                if line.startswith("HF_TOKEN="):
+                    os.environ["HF_TOKEN"] = line.split("=", 1)[1].strip().strip("\"'")
+                    break
 
-    # Download based on source
-    if args.source == "huggingface":
-        model_dir = download_from_huggingface(args.version, args.target_dir)
+    if args.sonic:
+        print("=" * 60)
+        print("GEAR-SONIC Model Downloader")
+        print("=" * 60)
+        print(f"Target:  {args.sonic_dir}")
+        print("=" * 60)
+        print()
+
+        model_dir = download_sonic_models(args.sonic_dir)
     else:
-        model_dir = download_from_isaac_groot(args.version, args.target_dir)
+        print("=" * 60)
+        print("GR00T VLA Model Downloader")
+        print("=" * 60)
+        print(f"Version: {args.version.upper()}")
+        print(f"Source:  {args.source}")
+        print(f"Target:  {args.target_dir}")
+        print("=" * 60)
+        print()
 
-    # Verify models
+        if args.source == "huggingface":
+            model_dir = download_from_huggingface(args.version, args.target_dir)
+        else:
+            model_dir = download_from_isaac_groot(args.version, args.target_dir)
+
     if args.verify and model_dir:
         if not verify_models(model_dir):
-            print("\n⚠️  Model verification failed")
+            print("\nModel verification failed")
             sys.exit(1)
 
     print("\n" + "=" * 60)
-    print("✅ Download complete!")
+    print("Download complete!")
     print("=" * 60)
     print(f"\nModels available at: {model_dir}")
-    print("\nNext steps:")
-    print("1. Update g1_groot_wbc_unified.yaml with model paths")
-    print("2. Run: python scripts/launch_robot.py --config g1_groot_wbc_unified.yaml")
 
 
 if __name__ == "__main__":

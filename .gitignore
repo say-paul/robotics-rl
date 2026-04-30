@@ -1,6 +1,10 @@
 # Models (ONNX, weights — download separately)
 models/
 
+# Local environment overrides
+.env
+.claude/
+
 # Python
 __pycache__/
 *.py[cod]

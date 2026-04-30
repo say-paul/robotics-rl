@@ -1,0 +1,69 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: g1-sim
+  namespace: robotics-rl
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: g1-sim
+  template:
+    metadata:
+      labels:
+        app: g1-sim
+    spec:
+      nodeSelector:
+        nvidia.com/gpu.product: NVIDIA-L40S
+      tolerations:
+        - key: nvidia.com/gpu
+          operator: Exists
+          effect: NoSchedule
+      containers:
+        - name: sim
+          image: quay.io/jary/rdp-isaac-sim:latest
+          env:
+            - name: ACCEPT_EULA
+              value: "Y"
+            - name: HEADLESS
+              value: "1"
+          resources:
+            limits:
+              nvidia.com/gpu: "1"
+              memory: 24Gi
+              cpu: "8"
+            requests:
+              nvidia.com/gpu: "1"
+              memory: 8Gi
+              cpu: "2"
+          securityContext:
+            capabilities:
+              add:
+                - NET_ADMIN
+          volumeMounts:
+            - name: dshm
+              mountPath: /dev/shm
+
+        - name: viewer
+          image: quay.io/jary/rdp-isaac-viewer:latest
+          ports:
+            - containerPort: 8090
+              name: hls
+          volumeMounts:
+            - name: dshm
+              mountPath: /dev/shm
+          resources:
+            limits:
+              memory: 1Gi
+              cpu: "2"
+            requests:
+              memory: 256Mi
+              cpu: "500m"
+
+      volumes:
+        - name: dshm
+          emptyDir:
+            medium: Memory
+            sizeLimit: 4Gi

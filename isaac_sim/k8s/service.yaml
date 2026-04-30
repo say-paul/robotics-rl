@@ -1,0 +1,12 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: g1-viewer
+  namespace: robotics-rl
+spec:
+  selector:
+    app: g1-sim
+  ports:
+    - port: 8090
+      targetPort: 8090
+      name: hls
